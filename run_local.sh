@@ -63,12 +63,22 @@ else
   exit 1
 fi
 
-# Basic checks for post-process libs (warn-only)
-for so in libyolo_hailortpp_postprocess.so libwhole_buffer.so; do
-  if [[ ! -f "$ROOT_DIR/$so" ]]; then
-    echo "Warning: $so not found in repo root. Ensure paths in detection_pipeline.py are valid." >&2
-  fi
-done
+# Make hailo_apps package available (installed in hailo-rpi5-examples venv)
+HAILO_EXAMPLES_SITE="$HOME/repos/hailo-rpi5-examples/venv_hailo_rpi_examples/lib/python3.11/site-packages"
+if [[ -d "$HAILO_EXAMPLES_SITE" ]]; then
+  export PYTHONPATH="${HAILO_EXAMPLES_SITE}:${PYTHONPATH:-}"
+else
+  echo "Warning: hailo_apps site-packages not found at $HAILO_EXAMPLES_SITE" >&2
+fi
+
+# Post-process .so files come from TAPPAS_POST_PROC_DIR (set by setup_env.sh)
+if [[ -n "${TAPPAS_POST_PROC_DIR:-}" ]]; then
+  for so in libyolo_hailortpp_postprocess.so libwhole_buffer.so; do
+    if [[ ! -f "$TAPPAS_POST_PROC_DIR/$so" ]]; then
+      echo "Warning: $so not found in $TAPPAS_POST_PROC_DIR" >&2
+    fi
+  done
+fi
 
 P_MEDIAMTX=""
 P_PRODUCER=""

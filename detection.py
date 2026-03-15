@@ -8,7 +8,7 @@ import cv2
 import hailo
 import json
 
-from hailo_rpi_common import get_caps_from_pad, get_numpy_from_buffer
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import get_caps_from_pad, get_numpy_from_buffer
 from detection_pipeline import GStreamerDetectionApp, app_callback_class
 
 # Make AWS optional for local runs
