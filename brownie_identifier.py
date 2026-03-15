@@ -72,6 +72,17 @@ class BrownieIdentifier:
         self._activated_ng = self.network_group.activate()
         self._activated_ng.__enter__()
 
+    def close(self):
+        """Clean up Hailo resources."""
+        if self.backend == "hailo" and hasattr(self, '_activated_ng'):
+            try:
+                self._activated_ng.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    def __del__(self):
+        self.close()
+
         # Get input/output info
         input_vstreams_info = self.hef.get_input_vstream_infos()
         output_vstreams_info = self.hef.get_output_vstream_infos()

@@ -153,13 +153,13 @@ fi
 
 # --- Start detection pipeline ---
 echo "Starting detection pipeline (local, AWS disabled)..."
-DISABLE_AWS=1 \
-  ${BROWNIE_MODEL:+BROWNIE_MODEL="$BROWNIE_MODEL"} \
-  ${BROWNIE_EMBEDDING:+BROWNIE_EMBEDDING="$BROWNIE_EMBEDDING"} \
-  ${BROWNIE_THRESHOLD:+BROWNIE_THRESHOLD="$BROWNIE_THRESHOLD"} \
-  ${BROWNIE_BACKEND:+BROWNIE_BACKEND="$BROWNIE_BACKEND"} \
-  DISABLE_BROWNIE="$DISABLE_BROWNIE" \
-  python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
+export DISABLE_AWS=1
+export DISABLE_BROWNIE="$DISABLE_BROWNIE"
+[[ -n "$BROWNIE_MODEL" ]]     && export BROWNIE_MODEL="$BROWNIE_MODEL"
+[[ -n "$BROWNIE_EMBEDDING" ]] && export BROWNIE_EMBEDDING="$BROWNIE_EMBEDDING"
+[[ -n "$BROWNIE_THRESHOLD" ]] && export BROWNIE_THRESHOLD="$BROWNIE_THRESHOLD"
+[[ -n "$BROWNIE_BACKEND" ]]   && export BROWNIE_BACKEND="$BROWNIE_BACKEND"
+python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
 P_DETECT=$!
 
 # --- Wait for inference shared memory to be ready ---
