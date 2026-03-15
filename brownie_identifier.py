@@ -52,7 +52,6 @@ class BrownieIdentifier:
         from hailo_platform import (
             VDevice,
             HEF,
-            FormatType,
             InferVStreams,
             InputVStreamParams,
             OutputVStreamParams,
@@ -68,6 +67,9 @@ class BrownieIdentifier:
         params = VDevice.create_params()
         self.vdevice = VDevice(params)
         self.network_group = self.vdevice.configure(self.hef)[0]
+
+        # Activate the network group (required before inference)
+        self._network_group_context = self.network_group.activate()
 
         # Get input/output info
         input_vstreams_info = self.hef.get_input_vstream_infos()
@@ -92,11 +94,15 @@ class BrownieIdentifier:
         self._input_shape = self.session.get_inputs()[0].shape
         print(f"ONNX CPU embedding model loaded: input={self._input_name} {self._input_shape}")
 
-    def preprocess(self, crop_rgb):
-        """Resize and normalize crop for model input."""
+    def preprocess_hailo(self, crop_rgb):
+        """Resize crop for Hailo input (uint8, no normalization — HEF handles it)."""
+        img = cv2.resize(crop_rgb, self.input_size)
+        return img.astype(np.uint8)
+
+    def preprocess_cpu(self, crop_rgb):
+        """Resize and normalize crop for ONNX/CPU input (float32, ImageNet normalization)."""
         img = cv2.resize(crop_rgb, self.input_size)
         img = img.astype(np.float32) / 255.0
-        # ImageNet normalization
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
         img = (img - mean) / std
@@ -104,10 +110,11 @@ class BrownieIdentifier:
 
     def get_embedding(self, crop_rgb):
         """Run the embedding model and return L2-normalized feature vector."""
-        preprocessed = self.preprocess(crop_rgb)
         if self.backend == "hailo":
+            preprocessed = self.preprocess_hailo(crop_rgb)
             return self._infer_hailo(preprocessed)
         else:
+            preprocessed = self.preprocess_cpu(crop_rgb)
             return self._infer_cpu(preprocessed)
 
     def _infer_hailo(self, preprocessed):
@@ -118,9 +125,8 @@ class BrownieIdentifier:
         input_vstream_params = InputVStreamParams.make(self.network_group)
         output_vstream_params = OutputVStreamParams.make(self.network_group)
 
-        # Hailo expects NHWC uint8 or float32 depending on model
-        # Add batch dimension
-        input_data = np.expand_dims(preprocessed, 0).astype(np.float32)
+        # HEF expects uint8 NHWC input
+        input_data = np.expand_dims(preprocessed, 0).astype(np.uint8)
 
         with InferVStreams(
             self.network_group, input_vstream_params, output_vstream_params
