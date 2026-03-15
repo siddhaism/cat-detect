@@ -9,13 +9,13 @@ import setproctitle
 import cv2
 import time
 import hailo
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
+from hailo_rpi_common import (
     get_default_parser,
     GStreamerApp,
     app_callback_class,
     dummy_callback,
+    detect_hailo_arch,
 )
-from hailo_apps.hailo_app_python.core.common.utils import detect_hailo_arch
 
 
 
