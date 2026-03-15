@@ -7,14 +7,21 @@ cd "$ROOT_DIR"
 print_usage() {
   cat <<EOF
 Usage: bash run_local.sh --hef /path/to/model.hef [--no-viewer] [--stream] [--arch hailo8|hailo8l]
+                         [--brownie-model PATH] [--brownie-embedding PATH]
+                         [--brownie-threshold 0.70] [--no-brownie]
 
 Starts camera producer, detection pipeline (AWS disabled), and viewer/stream.
 
 Options:
-  --hef PATH       Path to HEF model file (required)
-  --no-viewer      Do not launch the viewer sink
-  --stream         Stream to MediaMTX via RTSP (view at http://<pi-ip>:8889/catcam)
-  --arch VALUE     Force Hailo architecture (e.g., hailo8 or hailo8l)
+  --hef PATH                Path to HEF model file (required)
+  --no-viewer               Do not launch the viewer sink
+  --stream                  Stream to MediaMTX via RTSP (view at http://<pi-ip>:8889/catcam)
+  --arch VALUE              Force Hailo architecture (e.g., hailo8 or hailo8l)
+  --brownie-model PATH      Path to embedding model HEF (default: resnet_v1_50_h8l.hef)
+  --brownie-embedding PATH  Path to brownie_embedding.npy
+  --brownie-threshold NUM   Similarity threshold 0.0-1.0 (default: 0.70)
+  --brownie-backend VALUE   "hailo" or "cpu" (default: hailo)
+  --no-brownie              Disable Brownie identification
 EOF
 }
 
@@ -22,6 +29,11 @@ HEF_PATH=""
 LAUNCH_VIEWER=1
 ENABLE_STREAM=0
 ARCH_ARG=()
+BROWNIE_MODEL=""
+BROWNIE_EMBEDDING=""
+BROWNIE_THRESHOLD=""
+BROWNIE_BACKEND=""
+DISABLE_BROWNIE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,6 +45,16 @@ while [[ $# -gt 0 ]]; do
       ENABLE_STREAM=1; shift;;
     --arch)
       ARCH_ARG=("--arch" "$2"); shift 2;;
+    --brownie-model)
+      BROWNIE_MODEL="$2"; shift 2;;
+    --brownie-embedding)
+      BROWNIE_EMBEDDING="$2"; shift 2;;
+    --brownie-threshold)
+      BROWNIE_THRESHOLD="$2"; shift 2;;
+    --brownie-backend)
+      BROWNIE_BACKEND="$2"; shift 2;;
+    --no-brownie)
+      DISABLE_BROWNIE=1; shift;;
     -h|--help)
       print_usage; exit 0;;
     *)
@@ -131,7 +153,13 @@ fi
 
 # --- Start detection pipeline ---
 echo "Starting detection pipeline (local, AWS disabled)..."
-DISABLE_AWS=1 python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
+DISABLE_AWS=1 \
+  ${BROWNIE_MODEL:+BROWNIE_MODEL="$BROWNIE_MODEL"} \
+  ${BROWNIE_EMBEDDING:+BROWNIE_EMBEDDING="$BROWNIE_EMBEDDING"} \
+  ${BROWNIE_THRESHOLD:+BROWNIE_THRESHOLD="$BROWNIE_THRESHOLD"} \
+  ${BROWNIE_BACKEND:+BROWNIE_BACKEND="$BROWNIE_BACKEND"} \
+  DISABLE_BROWNIE="$DISABLE_BROWNIE" \
+  python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
 P_DETECT=$!
 
 # --- Wait for inference shared memory to be ready ---

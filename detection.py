@@ -56,16 +56,78 @@ else:
     client = None
 
 # -----------------------------------------------------------------------------------------------
+# Brownie identification setup
+# -----------------------------------------------------------------------------------------------
+brownie_id = None
+BROWNIE_EMBEDDING = os.environ.get(
+    "BROWNIE_EMBEDDING",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
+)
+BROWNIE_MODEL = os.environ.get(
+    "BROWNIE_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "resnet_v1_50_h8l.hef"),
+)
+BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "hailo")
+BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
+DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
+
+if not DISABLE_BROWNIE and os.path.exists(BROWNIE_EMBEDDING) and os.path.exists(BROWNIE_MODEL):
+    try:
+        from brownie_identifier import BrownieIdentifier
+
+        brownie_id = BrownieIdentifier(
+            embedding_path=BROWNIE_EMBEDDING,
+            model_path=BROWNIE_MODEL,
+            backend=BROWNIE_BACKEND,
+            similarity_threshold=BROWNIE_THRESHOLD,
+        )
+        print(f"Brownie identifier loaded (backend={BROWNIE_BACKEND}, threshold={BROWNIE_THRESHOLD})")
+    except Exception as e:
+        print(f"Warning: Failed to initialize Brownie identifier: {e}")
+        brownie_id = None
+elif not DISABLE_BROWNIE:
+    if not os.path.exists(BROWNIE_EMBEDDING):
+        print(f"Brownie embedding not found at {BROWNIE_EMBEDDING} — Brownie ID disabled.")
+    if not os.path.exists(BROWNIE_MODEL):
+        print(f"Brownie model not found at {BROWNIE_MODEL} — Brownie ID disabled.")
+
+# -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
+        # Enable frame extraction when Brownie identification is active
+        if brownie_id is not None:
+            self.use_frame = True
 
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
+
+def _relabel_detection(roi, detection, new_label):
+    """Replace a detection's label by removing and re-adding with the new label.
+    Needed because HailoDetection only exposes get_label(), not set_label()."""
+    bbox = detection.get_bbox()
+    confidence = detection.get_confidence()
+    # Preserve sub-objects (tracking IDs, classifications, etc.)
+    sub_objects = detection.get_objects()
+
+    # Remove original detection
+    roi.remove_object(detection)
+
+    # Create new detection with updated label
+    new_det = hailo.HailoDetection(
+        bbox, new_label, confidence
+    )
+    # Re-attach sub-objects
+    for obj in sub_objects:
+        new_det.add_object(obj)
+
+    roi.add_object(new_det)
+    return new_det
+
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad, info, user_data):
@@ -96,20 +158,50 @@ def app_callback(pad, info, user_data):
     ]
 
     for detection in filtered_detections:
+        label = detection.get_label()
+
+        # --- Brownie identification ---
+        if brownie_id is not None and frame is not None:
+            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+            track_id = track[0].get_id() if track else None
+
+            if track_id is not None and brownie_id.should_check(track_id):
+                try:
+                    bbox = detection.get_bbox()
+                    x1 = max(0, int(bbox.xmin() * width))
+                    y1 = max(0, int(bbox.ymin() * height))
+                    x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+                    y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+
+                    if x2 > x1 and y2 > y1:
+                        crop = frame[y1:y2, x1:x2]
+                        is_brownie, similarity = brownie_id.is_brownie(crop)
+                        brownie_id.cache_result(track_id, is_brownie)
+                        if is_brownie:
+                            detection = _relabel_detection(roi, detection, "Brownie")
+                            label = "Brownie"
+                            print(f"Brownie identified! (track={track_id}, sim={similarity:.3f})")
+                except Exception as e:
+                    print(f"Brownie ID error: {e}")
+            elif track_id is not None and brownie_id.get_cached_result(track_id):
+                detection = _relabel_detection(roi, detection, "Brownie")
+                label = "Brownie"
+
+        # --- Tracking and MQTT ---
         track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
         if len(track) == 0:
             continue
         tracking_id = track[0].get_id()
         # Emit event only if the tracking ID hasn't been emitted before
         if tracking_id not in emitted_ids:
-            print(f"Detection!: {tracking_id} {detection.get_label()} {detection.get_confidence():.2f}\n")
+            print(f"Detection!: {tracking_id} {label} {detection.get_confidence():.2f}\n")
             emitted_ids.add(tracking_id)
             if len(emitted_ids) > MAX_TRACKED_IDS:
                 emitted_ids.clear()
             if client is not None:
                 payload = {
                     "tracking_id": tracking_id,
-                    "label": detection.get_label(),
+                    "label": label,
                 }
                 try:
                     response = client.publish(topic=topic, qos=1, payload=json.dumps(payload))
