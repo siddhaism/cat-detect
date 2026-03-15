@@ -21,6 +21,7 @@ except Exception:  # boto3 is optional
 
 # Set to keep track of emitted tracking IDs
 emitted_ids = set()
+MAX_TRACKED_IDS = 10000
 
 # Define the target classes for detection
 # this should align to the COCO list of objects
@@ -63,10 +64,6 @@ else:
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
-        self.new_variable = 42  # New variable example
-
-    def new_function(self):  # New function example
-        return "The meaning of life is: "
 
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
@@ -100,17 +97,14 @@ def app_callback(pad, info, user_data):
         if detection.get_label() in target_classes
     ]
 
-    # Prepare detection data for Supervision
-    boxes = []
-    confidences = []
-    class_ids = []
-
     for detection in filtered_detections:
         tracking_id = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)[0].get_id()
         # Emit event only if the tracking ID hasn't been emitted before
         if tracking_id not in emitted_ids:
             print(f"Detection!: {tracking_id} {detection.get_label()} {detection.get_confidence():.2f}\n")
             emitted_ids.add(tracking_id)
+            if len(emitted_ids) > MAX_TRACKED_IDS:
+                emitted_ids.clear()
             if client is not None:
                 payload = {
                     "tracking_id": tracking_id,
@@ -121,13 +115,6 @@ def app_callback(pad, info, user_data):
                     print(f"Message published: {response}")
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
-
-        label = detection.get_label()
-        bbox = detection.get_bbox()
-        confidence = detection.get_confidence()
-        boxes.append([bbox.xmin() * width, bbox.ymin() * height, bbox.xmax() * width, bbox.ymax() * height])
-        confidences.append(confidence)
-        class_ids.append(label)  # Ensure label is an integer class ID
 
     return Gst.PadProbeReturn.OK
 

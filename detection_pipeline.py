@@ -36,14 +36,14 @@ class GStreamerDetectionApp(GStreamerApp):
         parser.add_argument(
             "--labels-json",
             default=None,
-            help="Path to costume labels JSON file",
+            help="Path to custom labels JSON file",
         )
         args = parser.parse_args()
         # Call the parent class constructor
         super().__init__(args, user_data)
         # Additional initialization code can be added here
         # Set Hailo parameters these parameters should be set based on the model used
-        self.batch_size = 2
+        self.batch_size = 1
         self.network_width = 640
         self.network_height = 640
         self.network_format = "RGB"
