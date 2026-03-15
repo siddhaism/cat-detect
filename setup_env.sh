@@ -10,9 +10,9 @@ TAPPAS_REQUIRED_VERSION=("3.29.0" "3.29.1" "3.30.0" "3.31.0")
 
 # Function to check if the script is being sourced
 is_sourced() {
-    if [ -n "$ZSH_VERSION" ]; then
+    if [ -n "${ZSH_VERSION:-}" ]; then
         [[ -o sourced ]]
-    elif [ -n "$BASH_VERSION" ]; then
+    elif [ -n "${BASH_VERSION:-}" ]; then
         [[ "${BASH_SOURCE[0]}" != "$0" ]]
     else
         echo "Unsupported shell. Please use bash or zsh."
