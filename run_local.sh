@@ -115,7 +115,19 @@ fi
 echo "Starting camera producer..."
 bash "$ROOT_DIR/producer-camera.sh" >/dev/null 2>&1 &
 P_PRODUCER=$!
-sleep 1
+
+# Wait for camera shared memory to be ready
+echo "Waiting for camera feed..."
+for i in $(seq 1 30); do
+  if [[ -e /tmp/feed.raw ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ ! -e /tmp/feed.raw ]]; then
+  echo "Error: /tmp/feed.raw not created after 30s. Camera producer may have failed." >&2
+  exit 1
+fi
 
 # --- Start detection pipeline ---
 echo "Starting detection pipeline (local, AWS disabled)..."
