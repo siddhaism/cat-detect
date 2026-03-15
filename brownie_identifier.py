@@ -67,11 +67,13 @@ class BrownieIdentifier:
         backend="hailo",
         similarity_threshold=0.70,
         cache_ttl=10.0,
+        standalone=False,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
         self.cache_ttl = cache_ttl
         self.model_path = model_path
+        self.standalone = standalone
 
         # Tracking cache: tracking_id -> (is_brownie, similarity, timestamp)
         self._cache = {}
@@ -92,11 +94,39 @@ class BrownieIdentifier:
         self._worker = None
         self._input_queue = None
         self._result_queue = None
+        self._hailo_direct = None
 
         if backend == "hailo":
-            self._start_hailo_worker()
+            if standalone:
+                self._init_hailo_direct()
+            else:
+                self._start_hailo_worker()
         elif backend == "simple":
             print("Brownie identifier using simple (OpenCV histogram) backend.")
+
+    def _init_hailo_direct(self):
+        """Initialize Hailo directly in this process (for standalone/compute_embeddings use)."""
+        from hailo_platform import VDevice, HEF, InferVStreams, InputVStreamParams, OutputVStreamParams
+
+        self._hailo_imports = {
+            "InferVStreams": InferVStreams,
+            "InputVStreamParams": InputVStreamParams,
+            "OutputVStreamParams": OutputVStreamParams,
+        }
+
+        self.hef = HEF(self.model_path)
+        params = VDevice.create_params()
+        self.vdevice = VDevice(params)
+        self.network_group = self.vdevice.configure(self.hef)[0]
+        self._activated_ng = self.network_group.activate()
+        self._activated_ng.__enter__()
+
+        input_info = self.hef.get_input_vstream_infos()[0]
+        self._input_name = input_info.name
+        self._input_shape = input_info.shape
+        self._hailo_direct = True
+
+        print(f"Hailo embedding model loaded (direct): input={self._input_name} {self._input_shape}")
 
     def _start_hailo_worker(self):
         """Start the Hailo inference worker process."""
@@ -117,7 +147,12 @@ class BrownieIdentifier:
             print("Hailo embedding worker process started.")
 
     def close(self):
-        """Shut down the worker process."""
+        """Shut down the worker process or direct Hailo resources."""
+        if self._hailo_direct and hasattr(self, "_activated_ng"):
+            try:
+                self._activated_ng.__exit__(None, None, None)
+            except Exception:
+                pass
         if self._input_queue is not None:
             try:
                 self._input_queue.put(None)
@@ -137,39 +172,29 @@ class BrownieIdentifier:
         """Extract features from an image crop."""
         if self.backend == "simple":
             return self._extract_simple_features(crop_rgb)
+        elif self._hailo_direct:
+            # Direct Hailo inference (standalone mode)
+            InferVStreams = self._hailo_imports["InferVStreams"]
+            InputVStreamParams = self._hailo_imports["InputVStreamParams"]
+            OutputVStreamParams = self._hailo_imports["OutputVStreamParams"]
+
+            img = cv2.resize(crop_rgb, (self._input_shape[1], self._input_shape[0])).astype(np.uint8)
+            input_data = np.expand_dims(img, 0)
+
+            input_vstream_params = InputVStreamParams.make(self.network_group)
+            output_vstream_params = OutputVStreamParams.make(self.network_group)
+
+            with InferVStreams(self.network_group, input_vstream_params, output_vstream_params) as infer:
+                result = infer.infer({self._input_name: input_data})
+
+            output_key = list(result.keys())[0]
+            embedding = result[output_key].flatten().astype(np.float32)
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            return embedding
         else:
-            # For hailo backend, this is only used by compute_embeddings.py
-            # (standalone, no GStreamer pipeline conflict)
-            return self._get_embedding_sync(crop_rgb)
-
-    def _get_embedding_sync(self, crop_rgb):
-        """Synchronous embedding extraction (for compute_embeddings.py standalone use)."""
-        from hailo_platform import VDevice, HEF, InferVStreams, InputVStreamParams, OutputVStreamParams
-
-        hef = HEF(self.model_path)
-        params = VDevice.create_params()
-        with VDevice(params) as vdevice:
-            network_group = vdevice.configure(hef)[0]
-            with network_group.activate():
-                input_info = hef.get_input_vstream_infos()[0]
-                input_name = input_info.name
-                input_shape = input_info.shape
-
-                input_vstream_params = InputVStreamParams.make(network_group)
-                output_vstream_params = OutputVStreamParams.make(network_group)
-
-                img = cv2.resize(crop_rgb, (input_shape[1], input_shape[0])).astype(np.uint8)
-                input_data = np.expand_dims(img, 0)
-
-                with InferVStreams(network_group, input_vstream_params, output_vstream_params) as infer:
-                    result = infer.infer({input_name: input_data})
-
-                output_key = list(result.keys())[0]
-                embedding = result[output_key].flatten().astype(np.float32)
-                norm = np.linalg.norm(embedding)
-                if norm > 0:
-                    embedding = embedding / norm
-                return embedding
+            raise RuntimeError("Use submit_crop/poll_results for worker mode")
 
     def _extract_simple_features(self, crop_rgb):
         """Extract color histogram features using OpenCV. No model needed."""

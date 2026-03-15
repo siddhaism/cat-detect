@@ -52,11 +52,12 @@ def main():
 
     from brownie_identifier import BrownieIdentifier
 
-    # Create identifier without reference embedding (we're building it)
+    # Create identifier in standalone mode (no worker process needed)
     identifier = BrownieIdentifier(
         embedding_path=None,
         model_path=args.model,
         backend=backend,
+        standalone=True,
     )
 
     # Process all photos
