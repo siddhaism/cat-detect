@@ -26,7 +26,7 @@ MAX_TRACKED_IDS = 10000
 # https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
 # note that this just filters which ones we'll call MQTT on, they'll still appear as bounding boxes because we haven't
 # told hailo to exclude them.
-target_classes = {'person', 'car', 'bird'}
+target_classes = {'cat'}
 
 
 # Setup the IoT client for sending MQTT (optional)
