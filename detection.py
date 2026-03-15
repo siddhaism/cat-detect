@@ -69,7 +69,7 @@ BROWNIE_MODEL = os.environ.get(
     "BROWNIE_MODEL",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "resnet_v1_50_h8l.hef"),
 )
-BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "hailo")
+BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "simple")
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
@@ -89,6 +89,20 @@ elif not DISABLE_BROWNIE:
         print(f"Brownie model not found at {BROWNIE_MODEL} — Brownie ID disabled.")
 
 # -----------------------------------------------------------------------------------------------
+# Motion detection configuration
+# -----------------------------------------------------------------------------------------------
+ENABLE_MOTION = os.environ.get("ENABLE_MOTION", "1") not in ("0", "false", "False")
+MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "25"))
+MOTION_MIN_AREA = int(os.environ.get("MOTION_MIN_AREA", "5000"))
+MOTION_COOLDOWN_SECS = float(os.environ.get("MOTION_COOLDOWN", "3.0"))
+_motion_prev_gray = None
+_motion_cooldown = 0
+_motion_cooldown_frames = int(MOTION_COOLDOWN_SECS * 30)
+
+if ENABLE_MOTION:
+    print(f"Motion detection enabled (threshold={MOTION_THRESHOLD}, min_area={MOTION_MIN_AREA}, cooldown={MOTION_COOLDOWN_SECS}s)")
+
+# -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
@@ -96,7 +110,7 @@ class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
         # Enable frame extraction when Brownie identification is active
-        if _brownie_config is not None:
+        if _brownie_config is not None or ENABLE_MOTION:
             self.use_frame = True
 
 # -----------------------------------------------------------------------------------------------
@@ -126,6 +140,34 @@ def _relabel_detection(roi, detection, new_label):
     return new_det
 
 
+def _detect_motion(frame):
+    """Detect motion using frame differencing. Returns True if motion detected."""
+    global _motion_prev_gray, _motion_cooldown
+
+    small = cv2.resize(frame, (320, 180))
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+    if _motion_prev_gray is None:
+        _motion_prev_gray = gray
+        return True  # First frame, assume motion
+
+    diff = cv2.absdiff(_motion_prev_gray, gray)
+    thresh = cv2.threshold(diff, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
+    changed = cv2.countNonZero(thresh)
+    _motion_prev_gray = gray
+
+    if changed > MOTION_MIN_AREA:
+        _motion_cooldown = _motion_cooldown_frames
+        return True
+
+    if _motion_cooldown > 0:
+        _motion_cooldown -= 1
+        return True
+
+    return False
+
+
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad, info, user_data):
     global brownie_id, _brownie_init_done
@@ -145,6 +187,14 @@ def app_callback(pad, info, user_data):
     frame = None
     if user_data.use_frame and format and width and height:
         frame = get_numpy_from_buffer(buffer, format, width, height)
+
+    # Motion detection - skip processing and clear overlay if no motion
+    if ENABLE_MOTION and frame is not None:
+        if not _detect_motion(frame):
+            roi = hailo.get_roi_from_buffer(buffer)
+            for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
+                roi.remove_object(det)
+            return Gst.PadProbeReturn.OK
 
     # Lazy-initialize Brownie identifier after pipeline is running
     # (deferred so hailonet acquires the Hailo device first, enabling scheduler sharing)

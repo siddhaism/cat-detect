@@ -9,6 +9,7 @@ print_usage() {
 Usage: bash run_local.sh --hef /path/to/model.hef [--no-viewer] [--stream] [--arch hailo8|hailo8l]
                          [--brownie-model PATH] [--brownie-embedding PATH]
                          [--brownie-threshold 0.70] [--no-brownie]
+                         [--no-motion] [--motion-threshold NUM] [--motion-cooldown SECS]
 
 Starts camera producer, detection pipeline (AWS disabled), and viewer/stream.
 
@@ -20,8 +21,11 @@ Options:
   --brownie-model PATH      Path to embedding model HEF (default: resnet_v1_50_h8l.hef)
   --brownie-embedding PATH  Path to brownie_embedding.npy
   --brownie-threshold NUM   Similarity threshold 0.0-1.0 (default: 0.70)
-  --brownie-backend VALUE   "hailo" or "cpu" (default: hailo)
+  --brownie-backend VALUE   "simple" or "hailo" (default: simple)
   --no-brownie              Disable Brownie identification
+  --no-motion               Disable motion detection (process every frame)
+  --motion-threshold NUM    Pixel change threshold 0-255 (default: 25)
+  --motion-cooldown SECS    Keep processing for N seconds after motion stops (default: 3.0)
 EOF
 }
 
@@ -34,6 +38,9 @@ BROWNIE_EMBEDDING=""
 BROWNIE_THRESHOLD=""
 BROWNIE_BACKEND=""
 DISABLE_BROWNIE=0
+DISABLE_MOTION=0
+MOTION_THRESHOLD=""
+MOTION_COOLDOWN=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,6 +62,12 @@ while [[ $# -gt 0 ]]; do
       BROWNIE_BACKEND="$2"; shift 2;;
     --no-brownie)
       DISABLE_BROWNIE=1; shift;;
+    --no-motion)
+      DISABLE_MOTION=1; shift;;
+    --motion-threshold)
+      MOTION_THRESHOLD="$2"; shift 2;;
+    --motion-cooldown)
+      MOTION_COOLDOWN="$2"; shift 2;;
     -h|--help)
       print_usage; exit 0;;
     *)
@@ -159,6 +172,9 @@ export DISABLE_BROWNIE="$DISABLE_BROWNIE"
 [[ -n "$BROWNIE_EMBEDDING" ]] && export BROWNIE_EMBEDDING="$BROWNIE_EMBEDDING"
 [[ -n "$BROWNIE_THRESHOLD" ]] && export BROWNIE_THRESHOLD="$BROWNIE_THRESHOLD"
 [[ -n "$BROWNIE_BACKEND" ]]   && export BROWNIE_BACKEND="$BROWNIE_BACKEND"
+[[ "$DISABLE_MOTION" -eq 1 ]] && export ENABLE_MOTION=0
+[[ -n "$MOTION_THRESHOLD" ]]  && export MOTION_THRESHOLD="$MOTION_THRESHOLD"
+[[ -n "$MOTION_COOLDOWN" ]]   && export MOTION_COOLDOWN="$MOTION_COOLDOWN"
 python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
 P_DETECT=$!
 
