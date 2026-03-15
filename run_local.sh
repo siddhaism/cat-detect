@@ -71,14 +71,12 @@ else
   echo "Warning: hailo_apps site-packages not found at $HAILO_EXAMPLES_SITE" >&2
 fi
 
-# Post-process .so files come from TAPPAS_POST_PROC_DIR (set by setup_env.sh)
-if [[ -n "${TAPPAS_POST_PROC_DIR:-}" ]]; then
-  for so in libyolo_hailortpp_postprocess.so libwhole_buffer.so; do
-    if [[ ! -f "$TAPPAS_POST_PROC_DIR/$so" ]]; then
-      echo "Warning: $so not found in $TAPPAS_POST_PROC_DIR" >&2
-    fi
-  done
-fi
+# Post-process .so files should be in the repo root
+for so in libyolo_hailortpp_postprocess.so libwhole_buffer.so; do
+  if [[ ! -f "$ROOT_DIR/$so" ]]; then
+    echo "Warning: $so not found in $ROOT_DIR" >&2
+  fi
+done
 
 P_MEDIAMTX=""
 P_PRODUCER=""

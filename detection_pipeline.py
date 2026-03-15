@@ -57,9 +57,10 @@ class GStreamerDetectionApp(GStreamerApp):
         else:  # hailo8l
             self.hef_path = os.path.join(self.current_path, '../resources/yolov8s_h8l.hef')
 
-        # Post-processing shared objects from TAPPAS post-process directory
-        self.post_process_so = os.path.join(self.postprocess_dir, 'libyolo_hailortpp_postprocess.so')
-        self.cropper_process_so = os.path.join(self.postprocess_dir, 'libwhole_buffer.so')
+        # Post-processing shared objects (check repo dir, then system paths)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.post_process_so = os.path.join(script_dir, 'libyolo_hailortpp_postprocess.so')
+        self.cropper_process_so = os.path.join(script_dir, 'libwhole_buffer.so')
 
         # User-defined label JSON file
         self.labels_json = self.options_menu.labels_json
