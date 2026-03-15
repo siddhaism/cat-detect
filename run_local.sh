@@ -71,6 +71,7 @@ cleanup() {
   [[ -n "${P_PRODUCER:-}" ]] && kill "$P_PRODUCER" 2>/dev/null || true
   [[ -n "${P_DETECT:-}" ]] && kill "$P_DETECT" 2>/dev/null || true
   [[ -n "${P_VIEWER:-}" ]] && kill "$P_VIEWER" 2>/dev/null || true
+  rm -f /tmp/feed.raw /tmp/infered.feed
 }
 trap cleanup EXIT INT TERM
 
@@ -82,9 +83,18 @@ sleep 1
 echo "Starting detection pipeline (local, AWS disabled)..."
 DISABLE_AWS=1 python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
 P_DETECT=$!
-sleep 1
 
 if [[ "$LAUNCH_VIEWER" -eq 1 ]]; then
+  echo "Waiting for inference pipeline to be ready..."
+  for i in $(seq 1 30); do
+    if [[ -e /tmp/infered.feed ]]; then
+      break
+    fi
+    sleep 1
+  done
+  if [[ ! -e /tmp/infered.feed ]]; then
+    echo "Warning: /tmp/infered.feed not created after 30s. Starting viewer anyway..." >&2
+  fi
   echo "Starting viewer..."
   bash "$ROOT_DIR/consumer-infered-fpsdisplaysink.sh" &
   P_VIEWER=$!
