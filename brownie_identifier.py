@@ -69,7 +69,8 @@ class BrownieIdentifier:
         self.network_group = self.vdevice.configure(self.hef)[0]
 
         # Activate the network group (required before inference)
-        self._network_group_context = self.network_group.activate()
+        self._activated_ng = self.network_group.activate()
+        self._activated_ng.__enter__()
 
         # Get input/output info
         input_vstreams_info = self.hef.get_input_vstream_infos()
