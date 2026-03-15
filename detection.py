@@ -1,3 +1,4 @@
+from pathlib import Path
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -5,13 +6,11 @@ import os
 import numpy as np
 import cv2
 import hailo
-from hailo_rpi_common import (
-    get_caps_from_pad,
-    get_numpy_from_buffer,
-    app_callback_class,
-)
-from detection_pipeline import GStreamerDetectionApp
 import json
+
+from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
+from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
 
 # Make AWS optional for local runs
 try:
@@ -98,7 +97,10 @@ def app_callback(pad, info, user_data):
     ]
 
     for detection in filtered_detections:
-        tracking_id = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)[0].get_id()
+        track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+        if len(track) == 0:
+            continue
+        tracking_id = track[0].get_id()
         # Emit event only if the tracking ID hasn't been emitted before
         if tracking_id not in emitted_ids:
             print(f"Detection!: {tracking_id} {detection.get_label()} {detection.get_confidence():.2f}\n")
@@ -120,6 +122,11 @@ def app_callback(pad, info, user_data):
 
 
 if __name__ == "__main__":
+    # Point to the hailo-rpi5-examples .env file
+    env_file = Path(os.path.expanduser("~/repos/hailo-rpi5-examples/.env"))
+    if env_file.exists():
+        os.environ["HAILO_ENV_FILE"] = str(env_file)
+
     # Create an instance of the user app callback class
     user_data = user_app_callback_class()
     if client is None:
