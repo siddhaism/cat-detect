@@ -116,6 +116,13 @@ class BrownieIdentifier:
 
         self.hef = HEF(self.model_path)
         params = VDevice.create_params()
+        # Enable round-robin scheduling for device sharing with hailonet in GStreamer pipeline
+        try:
+            from hailo_platform import HailoSchedulingAlgorithm
+            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+            print("Hailo embedding model using ROUND_ROBIN scheduling for device sharing")
+        except (ImportError, AttributeError):
+            pass
         self.vdevice = VDevice(params)
         self.network_group = self.vdevice.configure(self.hef)[0]
         self._activated_ng = self.network_group.activate()
@@ -251,10 +258,10 @@ class BrownieIdentifier:
     # --- Identification (sync for simple backend) ---
 
     def is_brownie(self, crop_rgb):
-        """Synchronous check (simple backend only)."""
+        """Synchronous check using any backend (simple or standalone Hailo)."""
         if self.reference_embedding is None:
             return False, 0.0
-        embedding = self._extract_simple_features(crop_rgb)
+        embedding = self.get_embedding(crop_rgb)
         similarity = float(np.dot(embedding, self.reference_embedding))
         return similarity >= self.similarity_threshold, similarity
 

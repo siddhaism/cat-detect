@@ -59,6 +59,8 @@ else:
 # Brownie identification setup
 # -----------------------------------------------------------------------------------------------
 brownie_id = None
+_brownie_config = None
+_brownie_init_done = False
 BROWNIE_EMBEDDING = os.environ.get(
     "BROWNIE_EMBEDDING",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
@@ -72,19 +74,14 @@ BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
 if not DISABLE_BROWNIE and os.path.exists(BROWNIE_EMBEDDING) and os.path.exists(BROWNIE_MODEL):
-    try:
-        from brownie_identifier import BrownieIdentifier
-
-        brownie_id = BrownieIdentifier(
-            embedding_path=BROWNIE_EMBEDDING,
-            model_path=BROWNIE_MODEL,
-            backend=BROWNIE_BACKEND,
-            similarity_threshold=BROWNIE_THRESHOLD,
-        )
-        print(f"Brownie identifier loaded (backend={BROWNIE_BACKEND}, threshold={BROWNIE_THRESHOLD})")
-    except Exception as e:
-        print(f"Warning: Failed to initialize Brownie identifier: {e}")
-        brownie_id = None
+    _brownie_config = {
+        'embedding_path': BROWNIE_EMBEDDING,
+        'model_path': BROWNIE_MODEL,
+        'backend': BROWNIE_BACKEND,
+        'similarity_threshold': BROWNIE_THRESHOLD,
+        'standalone': True,
+    }
+    print(f"Brownie ID config ready (backend={BROWNIE_BACKEND}, threshold={BROWNIE_THRESHOLD}). Will initialize after pipeline starts.")
 elif not DISABLE_BROWNIE:
     if not os.path.exists(BROWNIE_EMBEDDING):
         print(f"Brownie embedding not found at {BROWNIE_EMBEDDING} — Brownie ID disabled.")
@@ -99,7 +96,7 @@ class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
         # Enable frame extraction when Brownie identification is active
-        if brownie_id is not None:
+        if _brownie_config is not None:
             self.use_frame = True
 
 # -----------------------------------------------------------------------------------------------
@@ -131,6 +128,8 @@ def _relabel_detection(roi, detection, new_label):
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad, info, user_data):
+    global brownie_id, _brownie_init_done
+
     # Get the GstBuffer from the probe info
     buffer = info.get_buffer()
     if buffer is None:
@@ -147,6 +146,17 @@ def app_callback(pad, info, user_data):
     if user_data.use_frame and format and width and height:
         frame = get_numpy_from_buffer(buffer, format, width, height)
 
+    # Lazy-initialize Brownie identifier after pipeline is running
+    # (deferred so hailonet acquires the Hailo device first, enabling scheduler sharing)
+    if _brownie_config is not None and brownie_id is None and not _brownie_init_done:
+        _brownie_init_done = True
+        try:
+            from brownie_identifier import BrownieIdentifier
+            brownie_id = BrownieIdentifier(**_brownie_config)
+            print("Brownie identifier initialized (deferred, after pipeline start)")
+        except Exception as e:
+            print(f"Warning: Failed to initialize Brownie identifier: {e}")
+
     # Extract detections from the buffer
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
@@ -162,9 +172,6 @@ def app_callback(pad, info, user_data):
 
         # --- Brownie identification ---
         if brownie_id is not None and frame is not None:
-            # Poll for async results from Hailo worker
-            brownie_id.poll_results()
-
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             track_id = track[0].get_id() if track else None
 
@@ -178,17 +185,12 @@ def app_callback(pad, info, user_data):
 
                     if x2 > x1 and y2 > y1:
                         crop = frame[y1:y2, x1:x2].copy()
-                        if brownie_id.backend == "hailo":
-                            # Async: send to worker, result arrives in future frames
-                            brownie_id.submit_crop(track_id, crop)
-                        else:
-                            # Sync: simple backend
-                            is_brownie, similarity = brownie_id.is_brownie(crop)
-                            brownie_id.cache_result(track_id, is_brownie)
-                            if is_brownie:
-                                detection = _relabel_detection(roi, detection, "Brownie")
-                                label = "Brownie"
-                                print(f"Brownie identified! (track={track_id}, sim={similarity:.3f})")
+                        is_brownie, similarity = brownie_id.is_brownie(crop)
+                        brownie_id.cache_result(track_id, is_brownie)
+                        if is_brownie:
+                            detection = _relabel_detection(roi, detection, "Brownie")
+                            label = "Brownie"
+                            print(f"Brownie identified! (track={track_id}, sim={similarity:.3f})")
                 except Exception as e:
                     print(f"Brownie ID error: {e}")
             elif track_id is not None and brownie_id.get_cached_result(track_id):
