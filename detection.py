@@ -162,6 +162,9 @@ def app_callback(pad, info, user_data):
 
         # --- Brownie identification ---
         if brownie_id is not None and frame is not None:
+            # Poll for async results from Hailo worker
+            brownie_id.poll_results()
+
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             track_id = track[0].get_id() if track else None
 
@@ -174,13 +177,18 @@ def app_callback(pad, info, user_data):
                     y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
 
                     if x2 > x1 and y2 > y1:
-                        crop = frame[y1:y2, x1:x2]
-                        is_brownie, similarity = brownie_id.is_brownie(crop)
-                        brownie_id.cache_result(track_id, is_brownie)
-                        if is_brownie:
-                            detection = _relabel_detection(roi, detection, "Brownie")
-                            label = "Brownie"
-                            print(f"Brownie identified! (track={track_id}, sim={similarity:.3f})")
+                        crop = frame[y1:y2, x1:x2].copy()
+                        if brownie_id.backend == "hailo":
+                            # Async: send to worker, result arrives in future frames
+                            brownie_id.submit_crop(track_id, crop)
+                        else:
+                            # Sync: simple backend
+                            is_brownie, similarity = brownie_id.is_brownie(crop)
+                            brownie_id.cache_result(track_id, is_brownie)
+                            if is_brownie:
+                                detection = _relabel_detection(roi, detection, "Brownie")
+                                label = "Brownie"
+                                print(f"Brownie identified! (track={track_id}, sim={similarity:.3f})")
                 except Exception as e:
                     print(f"Brownie ID error: {e}")
             elif track_id is not None and brownie_id.get_cached_result(track_id):

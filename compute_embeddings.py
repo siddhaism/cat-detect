@@ -3,11 +3,12 @@
 Compute Brownie's reference embedding from photos.
 
 Usage:
-  python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --model resnet_v1_50_h8l.hef
-  python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --model mobilenet_v2.onnx --backend cpu
+  python3 compute_embeddings.py --photos-dir ~/brownie_photos/
+  python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend hailo --model resnet_v1_50_h8l.hef
+  python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend cpu --model mobilenet_v2.onnx
 
-The script processes all images in --photos-dir, runs each through the embedding
-model, averages the embeddings, and saves to brownie_embedding.npy.
+The script processes all images in --photos-dir, extracts features,
+averages them, and saves to brownie_embedding.npy.
 
 Recommend 5-10+ photos of Brownie with various angles and lighting.
 """
@@ -25,16 +26,16 @@ def main():
         "--photos-dir", required=True, help="Directory with Brownie photos"
     )
     parser.add_argument(
-        "--model", required=True, help="Path to embedding model (.hef or .onnx)"
+        "--model", default=None, help="Path to embedding model (.hef or .onnx). Not needed for --backend simple."
     )
     parser.add_argument(
         "--output", default="brownie_embedding.npy", help="Output .npy file"
     )
     parser.add_argument(
         "--backend",
-        default="auto",
-        choices=["hailo", "cpu", "auto"],
-        help="Inference backend (default: auto-detect from model extension)",
+        default="hailo",
+        choices=["hailo", "cpu", "simple"],
+        help="Feature extraction backend (default: hailo)",
     )
     parser.add_argument(
         "--input-size",
@@ -44,10 +45,10 @@ def main():
     )
     args = parser.parse_args()
 
-    # Determine backend
     backend = args.backend
-    if backend == "auto":
-        backend = "hailo" if args.model.endswith(".hef") else "cpu"
+    if backend != "simple" and args.model is None:
+        print("Error: --model is required for hailo and cpu backends")
+        return
 
     from brownie_identifier import BrownieIdentifier
 
@@ -56,7 +57,6 @@ def main():
         embedding_path=None,
         model_path=args.model,
         backend=backend,
-        input_size=(args.input_size, args.input_size),
     )
 
     # Process all photos
