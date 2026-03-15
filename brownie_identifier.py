@@ -86,6 +86,14 @@ class BrownieIdentifier:
             if norm > 0:
                 self.reference_embedding = self.reference_embedding / norm
             print(f"Loaded Brownie reference embedding: shape={self.reference_embedding.shape}")
+
+            # Validate dimensions match the backend
+            if backend == "simple":
+                expected_dim = 148  # HSV(36+32+16) + LAB(16+24+24)
+                if self.reference_embedding.shape[0] != expected_dim:
+                    print(f"ERROR: Reference embedding dim={self.reference_embedding.shape[0]} but simple backend produces {expected_dim}-dim features.")
+                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend simple")
+                    self.reference_embedding = None
         else:
             self.reference_embedding = None
             print("Warning: No reference embedding loaded. Brownie ID will not work.")

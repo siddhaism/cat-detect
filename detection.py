@@ -70,23 +70,28 @@ BROWNIE_MODEL = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "resnet_v1_50_h8l.hef"),
 )
 BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "simple")
-BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
+BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.50"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
-if not DISABLE_BROWNIE and os.path.exists(BROWNIE_EMBEDDING) and os.path.exists(BROWNIE_MODEL):
-    _brownie_config = {
-        'embedding_path': BROWNIE_EMBEDDING,
-        'model_path': BROWNIE_MODEL,
-        'backend': BROWNIE_BACKEND,
-        'similarity_threshold': BROWNIE_THRESHOLD,
-        'standalone': True,
-    }
-    print(f"Brownie ID config ready (backend={BROWNIE_BACKEND}, threshold={BROWNIE_THRESHOLD}). Will initialize after pipeline starts.")
-elif not DISABLE_BROWNIE:
+if not DISABLE_BROWNIE:
+    _missing = []
     if not os.path.exists(BROWNIE_EMBEDDING):
-        print(f"Brownie embedding not found at {BROWNIE_EMBEDDING} — Brownie ID disabled.")
-    if not os.path.exists(BROWNIE_MODEL):
-        print(f"Brownie model not found at {BROWNIE_MODEL} — Brownie ID disabled.")
+        _missing.append(f"embedding not found at {BROWNIE_EMBEDDING}")
+    if BROWNIE_BACKEND != "simple" and not os.path.exists(BROWNIE_MODEL):
+        _missing.append(f"model not found at {BROWNIE_MODEL}")
+
+    if not _missing:
+        _brownie_config = {
+            'embedding_path': BROWNIE_EMBEDDING,
+            'model_path': BROWNIE_MODEL,
+            'backend': BROWNIE_BACKEND,
+            'similarity_threshold': BROWNIE_THRESHOLD,
+            'standalone': True,
+        }
+        print(f"Brownie ID config ready (backend={BROWNIE_BACKEND}, threshold={BROWNIE_THRESHOLD}). Will initialize after pipeline starts.")
+    else:
+        for m in _missing:
+            print(f"Brownie {m} — Brownie ID disabled.")
 
 # -----------------------------------------------------------------------------------------------
 # Motion detection configuration
@@ -237,10 +242,10 @@ def app_callback(pad, info, user_data):
                         crop = frame[y1:y2, x1:x2].copy()
                         is_brownie, similarity = brownie_id.is_brownie(crop)
                         brownie_id.cache_result(track_id, is_brownie)
+                        print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}")
                         if is_brownie:
                             detection = _relabel_detection(roi, detection, "Brownie")
                             label = "Brownie"
-                            print(f"Brownie identified! (track={track_id}, sim={similarity:.3f})")
                 except Exception as e:
                     print(f"Brownie ID error: {e}")
             elif track_id is not None and brownie_id.get_cached_result(track_id):
