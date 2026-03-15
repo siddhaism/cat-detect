@@ -6,19 +6,21 @@ cd "$ROOT_DIR"
 
 print_usage() {
   cat <<EOF
-Usage: bash run_local.sh --hef /path/to/model.hef [--no-viewer] [--arch hailo8|hailo8l]
+Usage: bash run_local.sh --hef /path/to/model.hef [--no-viewer] [--stream] [--arch hailo8|hailo8l]
 
-Starts camera producer, detection pipeline (AWS disabled), and viewer.
+Starts camera producer, detection pipeline (AWS disabled), and viewer/stream.
 
 Options:
   --hef PATH       Path to HEF model file (required)
   --no-viewer      Do not launch the viewer sink
+  --stream         Stream to MediaMTX via RTSP (view at http://<pi-ip>:8889/catcam)
   --arch VALUE     Force Hailo architecture (e.g., hailo8 or hailo8l)
 EOF
 }
 
 HEF_PATH=""
 LAUNCH_VIEWER=1
+ENABLE_STREAM=0
 ARCH_ARG=()
 
 while [[ $# -gt 0 ]]; do
@@ -27,6 +29,8 @@ while [[ $# -gt 0 ]]; do
       HEF_PATH="$2"; shift 2;;
     --no-viewer)
       LAUNCH_VIEWER=0; shift;;
+    --stream)
+      ENABLE_STREAM=1; shift;;
     --arch)
       ARCH_ARG=("--arch" "$2"); shift 2;;
     -h|--help)
@@ -66,40 +70,77 @@ for so in libyolo_hailortpp_postprocess.so libwhole_buffer.so; do
   fi
 done
 
+P_MEDIAMTX=""
+P_PRODUCER=""
+P_DETECT=""
+P_VIEWER=""
+P_STREAM=""
+
 cleanup() {
-  echo "\nStopping processes..."
-  [[ -n "${P_PRODUCER:-}" ]] && kill "$P_PRODUCER" 2>/dev/null || true
-  [[ -n "${P_DETECT:-}" ]] && kill "$P_DETECT" 2>/dev/null || true
-  [[ -n "${P_VIEWER:-}" ]] && kill "$P_VIEWER" 2>/dev/null || true
+  echo ""
+  echo "Stopping processes..."
+  [[ -n "$P_STREAM" ]]   && kill "$P_STREAM"   2>/dev/null || true
+  [[ -n "$P_VIEWER" ]]   && kill "$P_VIEWER"   2>/dev/null || true
+  [[ -n "$P_DETECT" ]]   && kill "$P_DETECT"   2>/dev/null || true
+  [[ -n "$P_PRODUCER" ]] && kill "$P_PRODUCER"  2>/dev/null || true
+  [[ -n "$P_MEDIAMTX" ]] && kill "$P_MEDIAMTX" 2>/dev/null || true
   rm -f /tmp/feed.raw /tmp/infered.feed
 }
 trap cleanup EXIT INT TERM
 
+# --- Start MediaMTX if streaming is enabled ---
+if [[ "$ENABLE_STREAM" -eq 1 ]]; then
+  if command -v mediamtx >/dev/null 2>&1; then
+    echo "Starting MediaMTX..."
+    mediamtx /etc/mediamtx/mediamtx.yml &>/dev/null &
+    P_MEDIAMTX=$!
+    sleep 1
+  elif systemctl is-active --quiet mediamtx 2>/dev/null; then
+    echo "MediaMTX is already running as a service."
+  else
+    echo "Error: --stream requires MediaMTX. Run: bash install-mediamtx.sh" >&2
+    exit 1
+  fi
+fi
+
+# --- Start camera producer ---
 echo "Starting camera producer..."
 bash "$ROOT_DIR/producer-camera.sh" >/dev/null 2>&1 &
 P_PRODUCER=$!
 sleep 1
 
+# --- Start detection pipeline ---
 echo "Starting detection pipeline (local, AWS disabled)..."
 DISABLE_AWS=1 python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
 P_DETECT=$!
 
-if [[ "$LAUNCH_VIEWER" -eq 1 ]]; then
-  echo "Waiting for inference pipeline to be ready..."
-  for i in $(seq 1 30); do
-    if [[ -e /tmp/infered.feed ]]; then
-      break
-    fi
-    sleep 1
-  done
-  if [[ ! -e /tmp/infered.feed ]]; then
-    echo "Warning: /tmp/infered.feed not created after 30s. Starting viewer anyway..." >&2
+# --- Wait for inference shared memory to be ready ---
+echo "Waiting for inference pipeline to be ready..."
+for i in $(seq 1 30); do
+  if [[ -e /tmp/infered.feed ]]; then
+    break
   fi
+  sleep 1
+done
+if [[ ! -e /tmp/infered.feed ]]; then
+  echo "Warning: /tmp/infered.feed not created after 30s. Starting consumers anyway..." >&2
+fi
+
+# --- Start RTSP stream consumer ---
+if [[ "$ENABLE_STREAM" -eq 1 ]]; then
+  echo "Starting RTSP stream to MediaMTX..."
+  bash "$ROOT_DIR/stream-to-mediamtx.sh" &
+  P_STREAM=$!
+  echo "Stream available at: http://<pi-ip>:8889/catcam"
+fi
+
+# --- Start display viewer ---
+if [[ "$LAUNCH_VIEWER" -eq 1 ]]; then
   echo "Starting viewer..."
   bash "$ROOT_DIR/consumer-infered-fpsdisplaysink.sh" &
   P_VIEWER=$!
 fi
 
-echo "\nRunning. Press Ctrl+C to stop."
+echo ""
+echo "Running. Press Ctrl+C to stop."
 wait "$P_DETECT"
-
