@@ -11,6 +11,6 @@ exec gst-launch-1.0 \
   queue max-size-buffers=3 leaky=downstream ! \
   videoconvert ! \
   video/x-raw,format=I420 ! \
-  x264enc tune=zerolatency bitrate=2000 speed-preset=ultrafast key-int-max=30 ! \
+  x264enc tune=zerolatency bitrate=5000 speed-preset=superfast key-int-max=30 ! \
   h264parse ! \
   rtspclientsink location="$RTSP_URL" protocols=tcp latency=0

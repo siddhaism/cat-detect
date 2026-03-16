@@ -208,9 +208,22 @@ def app_callback(pad, info, user_data):
         try:
             from brownie_identifier import BrownieIdentifier
             brownie_id = BrownieIdentifier(**_brownie_config)
-            print("Brownie identifier initialized (deferred, after pipeline start)")
+            if brownie_id.reference_embedding is not None:
+                print(f"\n{'='*60}")
+                print(f"  BROWNIE ID ACTIVE: backend={brownie_id.backend}, "
+                      f"dim={brownie_id.reference_embedding.shape[0]}, "
+                      f"threshold={brownie_id.similarity_threshold}")
+                print(f"{'='*60}\n")
+            else:
+                print(f"\n{'='*60}")
+                print(f"  BROWNIE ID DISABLED: no valid reference embedding")
+                print(f"  Run: python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend simple")
+                print(f"{'='*60}\n")
+                brownie_id = None
         except Exception as e:
-            print(f"Warning: Failed to initialize Brownie identifier: {e}")
+            print(f"\n{'='*60}")
+            print(f"  BROWNIE ID FAILED: {e}")
+            print(f"{'='*60}\n")
 
     # Extract detections from the buffer
     roi = hailo.get_roi_from_buffer(buffer)
