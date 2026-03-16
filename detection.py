@@ -59,8 +59,6 @@ else:
 # Brownie identification setup
 # -----------------------------------------------------------------------------------------------
 brownie_id = None
-_brownie_config = None
-_brownie_init_done = False
 BROWNIE_EMBEDDING = os.environ.get(
     "BROWNIE_EMBEDDING",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
@@ -81,14 +79,33 @@ if not DISABLE_BROWNIE:
         _missing.append(f"model not found at {BROWNIE_MODEL}")
 
     if not _missing:
-        _brownie_config = {
-            'embedding_path': BROWNIE_EMBEDDING,
-            'model_path': BROWNIE_MODEL,
-            'backend': BROWNIE_BACKEND,
-            'similarity_threshold': BROWNIE_THRESHOLD,
-            'standalone': True,
-        }
-        print(f"Brownie ID config ready (backend={BROWNIE_BACKEND}, threshold={BROWNIE_THRESHOLD}). Will initialize after pipeline starts.")
+        try:
+            from brownie_identifier import BrownieIdentifier
+            brownie_id = BrownieIdentifier(
+                embedding_path=BROWNIE_EMBEDDING,
+                model_path=BROWNIE_MODEL,
+                backend=BROWNIE_BACKEND,
+                similarity_threshold=BROWNIE_THRESHOLD,
+                standalone=True,
+            )
+            if brownie_id.reference_embedding is not None:
+                print(f"\n{'='*60}")
+                print(f"  BROWNIE ID ACTIVE: backend={BROWNIE_BACKEND}, "
+                      f"dim={brownie_id.reference_embedding.shape[0]}, "
+                      f"threshold={BROWNIE_THRESHOLD}")
+                print(f"{'='*60}\n")
+            else:
+                print(f"\n{'='*60}")
+                print(f"  BROWNIE ID DISABLED: no valid reference embedding")
+                print(f"  Run: python3 compute_embeddings.py "
+                      f"--photos-dir ~/brownie_photos/ --backend simple")
+                print(f"{'='*60}\n")
+                brownie_id = None
+        except Exception as e:
+            print(f"\n{'='*60}")
+            print(f"  BROWNIE ID FAILED: {e}")
+            print(f"{'='*60}\n")
+            brownie_id = None
     else:
         for m in _missing:
             print(f"Brownie {m} — Brownie ID disabled.")
@@ -98,7 +115,7 @@ if not DISABLE_BROWNIE:
 # -----------------------------------------------------------------------------------------------
 ENABLE_MOTION = os.environ.get("ENABLE_MOTION", "1") not in ("0", "false", "False")
 MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "25"))
-MOTION_MIN_AREA = int(os.environ.get("MOTION_MIN_AREA", "5000"))
+MOTION_MIN_AREA = int(os.environ.get("MOTION_MIN_AREA", "1500"))
 MOTION_COOLDOWN_SECS = float(os.environ.get("MOTION_COOLDOWN", "3.0"))
 _motion_prev_gray = None
 _motion_cooldown = 0
@@ -115,7 +132,7 @@ class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
         # Enable frame extraction when Brownie identification is active
-        if _brownie_config is not None or ENABLE_MOTION:
+        if brownie_id is not None or ENABLE_MOTION:
             self.use_frame = True
 
 # -----------------------------------------------------------------------------------------------
@@ -175,8 +192,6 @@ def _detect_motion(frame):
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad, info, user_data):
-    global brownie_id, _brownie_init_done
-
     # Get the GstBuffer from the probe info
     buffer = info.get_buffer()
     if buffer is None:
@@ -200,30 +215,6 @@ def app_callback(pad, info, user_data):
             for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
                 roi.remove_object(det)
             return Gst.PadProbeReturn.OK
-
-    # Lazy-initialize Brownie identifier after pipeline is running
-    # (deferred so hailonet acquires the Hailo device first, enabling scheduler sharing)
-    if _brownie_config is not None and brownie_id is None and not _brownie_init_done:
-        _brownie_init_done = True
-        try:
-            from brownie_identifier import BrownieIdentifier
-            brownie_id = BrownieIdentifier(**_brownie_config)
-            if brownie_id.reference_embedding is not None:
-                print(f"\n{'='*60}")
-                print(f"  BROWNIE ID ACTIVE: backend={brownie_id.backend}, "
-                      f"dim={brownie_id.reference_embedding.shape[0]}, "
-                      f"threshold={brownie_id.similarity_threshold}")
-                print(f"{'='*60}\n")
-            else:
-                print(f"\n{'='*60}")
-                print(f"  BROWNIE ID DISABLED: no valid reference embedding")
-                print(f"  Run: python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend simple")
-                print(f"{'='*60}\n")
-                brownie_id = None
-        except Exception as e:
-            print(f"\n{'='*60}")
-            print(f"  BROWNIE ID FAILED: {e}")
-            print(f"{'='*60}\n")
 
     # Extract detections from the buffer
     roi = hailo.get_roi_from_buffer(buffer)
