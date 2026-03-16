@@ -113,7 +113,7 @@ if not DISABLE_BROWNIE:
 # -----------------------------------------------------------------------------------------------
 # Motion detection configuration
 # -----------------------------------------------------------------------------------------------
-ENABLE_MOTION = os.environ.get("ENABLE_MOTION", "1") not in ("0", "false", "False")
+ENABLE_MOTION = os.environ.get("ENABLE_MOTION", "0") not in ("0", "false", "False")
 MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "25"))
 MOTION_MIN_AREA = int(os.environ.get("MOTION_MIN_AREA", "1500"))
 MOTION_COOLDOWN_SECS = float(os.environ.get("MOTION_COOLDOWN", "3.0"))
