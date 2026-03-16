@@ -222,6 +222,11 @@ def app_callback(pad, info, user_data):
         if detection.get_label() in target_classes
     ]
 
+    # Remove non-target detections from ROI so overlay only draws cats
+    for detection in hailo_detections:
+        if detection.get_label() not in target_classes:
+            roi.remove_object(detection)
+
     for detection in filtered_detections:
         label = detection.get_label()
 
