@@ -175,7 +175,7 @@ export DISABLE_BROWNIE="$DISABLE_BROWNIE"
 [[ "$DISABLE_MOTION" -eq 1 ]] && export ENABLE_MOTION=0
 [[ -n "$MOTION_THRESHOLD" ]]  && export MOTION_THRESHOLD="$MOTION_THRESHOLD"
 [[ -n "$MOTION_COOLDOWN" ]]   && export MOTION_COOLDOWN="$MOTION_COOLDOWN"
-python3 "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
+python3 -u "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
 P_DETECT=$!
 
 # --- Wait for inference shared memory to be ready ---
