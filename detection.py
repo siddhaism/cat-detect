@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -89,22 +90,22 @@ if not DISABLE_BROWNIE:
                 standalone=True,
             )
             if brownie_id.reference_embedding is not None:
-                print(f"\n{'='*60}")
+                print(f"\n{'='*60}", file=sys.stderr)
                 print(f"  BROWNIE ID ACTIVE: backend={BROWNIE_BACKEND}, "
                       f"dim={brownie_id.reference_embedding.shape[0]}, "
-                      f"threshold={BROWNIE_THRESHOLD}")
-                print(f"{'='*60}\n")
+                      f"threshold={BROWNIE_THRESHOLD}", file=sys.stderr)
+                print(f"{'='*60}\n", file=sys.stderr)
             else:
-                print(f"\n{'='*60}")
-                print(f"  BROWNIE ID DISABLED: no valid reference embedding")
+                print(f"\n{'='*60}", file=sys.stderr)
+                print(f"  BROWNIE ID DISABLED: no valid reference embedding", file=sys.stderr)
                 print(f"  Run: python3 compute_embeddings.py "
-                      f"--photos-dir ~/brownie_photos/ --backend simple")
-                print(f"{'='*60}\n")
+                      f"--photos-dir ~/brownie_photos/ --backend simple", file=sys.stderr)
+                print(f"{'='*60}\n", file=sys.stderr)
                 brownie_id = None
         except Exception as e:
-            print(f"\n{'='*60}")
-            print(f"  BROWNIE ID FAILED: {e}")
-            print(f"{'='*60}\n")
+            print(f"\n{'='*60}", file=sys.stderr)
+            print(f"  BROWNIE ID FAILED: {e}", file=sys.stderr)
+            print(f"{'='*60}\n", file=sys.stderr)
             brownie_id = None
     else:
         for m in _missing:
@@ -251,12 +252,12 @@ def app_callback(pad, info, user_data):
                         crop = frame[y1:y2, x1:x2].copy()
                         is_brownie, similarity = brownie_id.is_brownie(crop)
                         brownie_id.cache_result(track_id, is_brownie)
-                        print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}")
+                        print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
                         if is_brownie:
                             detection = _relabel_detection(roi, detection, "Brownie")
                             label = "Brownie"
                 except Exception as e:
-                    print(f"Brownie ID error: {e}")
+                    print(f"Brownie ID error: {e}", file=sys.stderr)
             elif track_id is not None and brownie_id.get_cached_result(track_id):
                 detection = _relabel_detection(roi, detection, "Brownie")
                 label = "Brownie"
