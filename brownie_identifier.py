@@ -37,7 +37,7 @@ class BrownieIdentifier:
         embedding_path,
         model_path=None,
         backend="hailo",
-        similarity_threshold=0.40,
+        similarity_threshold=0.57,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
@@ -395,7 +395,12 @@ class BrownieIdentifier:
                     similarity = float(np.dot(embedding, self.reference_embedding))
                     is_brownie = similarity >= self.similarity_threshold
                     self.cache_result(track_id, is_brownie, similarity)
-                    print(f"Brownie check [{self.backend}]: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
+                    # Show running average for debugging
+                    if track_id in self._cache:
+                        _, scores, _ = self._cache[track_id]
+                        avg = sum(scores) / len(scores)
+                        cached_result = self._cache[track_id][0]
+                        print(f"Brownie check [{self.backend}]: track={track_id}, sim={similarity:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
             except Exception as e:
                 print(f"Brownie {self.backend} error: {e}", file=sys.stderr)
 
@@ -446,32 +451,36 @@ class BrownieIdentifier:
         return similarity >= self.similarity_threshold, similarity
 
     # --- Tracking cache ---
+    # Cache: tracking_id -> (is_brownie, scores_list, timestamp)
+    # Decision uses average score across multiple checks, not just one high score.
 
     def should_check(self, tracking_id):
-        """Check multiple frames per track to find the best score.
-        Stop checking once identified as Brownie or after max checks."""
+        """Check multiple frames per track to build confidence.
+        Stop checking once confidently identified or after max checks."""
         if tracking_id not in self._cache:
             return True
-        is_brownie, best_sim, count, ts = self._cache[tracking_id]
-        if is_brownie:
-            return False
-        if count >= 5:
-            return False
+        is_brownie, scores, ts = self._cache[tracking_id]
+        if is_brownie and len(scores) >= 2:
+            return False  # Confidently identified
+        if len(scores) >= 5:
+            return False  # Max checks reached
         return (time.time() - ts) > 2.0
 
     def cache_result(self, tracking_id, is_brownie, similarity=0.0):
-        """Cache identification result, keeping the best similarity score."""
+        """Cache identification result. Decision based on average of all scores."""
         if len(self._cache) > self._max_cache:
-            oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][3])
+            oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][2])
             for k in oldest:
                 del self._cache[k]
         if tracking_id in self._cache:
-            prev_brownie, prev_sim, prev_count, _ = self._cache[tracking_id]
-            best_sim = max(prev_sim, similarity)
-            is_brownie = is_brownie or prev_brownie or (best_sim >= self.similarity_threshold)
-            self._cache[tracking_id] = (is_brownie, best_sim, prev_count + 1, time.time())
+            _, prev_scores, _ = self._cache[tracking_id]
+            scores = prev_scores + [similarity]
         else:
-            self._cache[tracking_id] = (is_brownie, similarity, 1, time.time())
+            scores = [similarity]
+        # Require average score above threshold (not just one high score)
+        avg_sim = sum(scores) / len(scores)
+        is_brownie = avg_sim >= self.similarity_threshold
+        self._cache[tracking_id] = (is_brownie, scores, time.time())
 
     def get_cached_result(self, tracking_id):
         """Get cached result for a tracking ID."""
