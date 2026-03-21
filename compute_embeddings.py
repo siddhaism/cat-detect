@@ -46,7 +46,6 @@ def main():
         embedding_path=None,
         model_path=args.model,
         backend=args.backend,
-        standalone=True,
     )
 
     photo_dir = Path(args.photos_dir)

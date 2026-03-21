@@ -9,6 +9,8 @@ import cv2
 import hailo
 import json
 
+from collections import OrderedDict
+
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import get_caps_from_pad, get_numpy_from_buffer
 from detection_pipeline import GStreamerDetectionApp, app_callback_class
 
@@ -18,8 +20,17 @@ try:
 except Exception:  # boto3 is optional
     boto3 = None
 
-# Set to keep track of emitted tracking IDs
-emitted_ids = set()
+
+def _env_bool(name, default=False):
+    """Parse a boolean environment variable (accepts 1/true/True/0/false/False)."""
+    val = os.environ.get(name, "")
+    if not val:
+        return default
+    return val.lower() in ("1", "true", "yes")
+
+
+# Set to keep track of emitted tracking IDs (OrderedDict for FIFO eviction)
+emitted_ids = OrderedDict()
 MAX_TRACKED_IDS = 10000
 
 # Define the target classes for detection
@@ -27,10 +38,7 @@ target_classes = {'cat'}
 
 
 # Setup the IoT client for sending MQTT (optional)
-DISABLE_AWS = (
-    os.getenv("DISABLE_AWS", "0") in ("1", "true", "True")
-    or os.getenv("AWS_DISABLED", "0") in ("1", "true", "True")
-)
+DISABLE_AWS = _env_bool("DISABLE_AWS") or _env_bool("AWS_DISABLED")
 
 topic = "detections"
 client = None
@@ -60,7 +68,7 @@ BROWNIE_EMBEDDING = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
 )
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.40"))
-DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
+DISABLE_BROWNIE = _env_bool("DISABLE_BROWNIE")
 
 if not DISABLE_BROWNIE:
     if os.path.exists(BROWNIE_EMBEDDING):
@@ -70,7 +78,6 @@ if not DISABLE_BROWNIE:
                 embedding_path=BROWNIE_EMBEDDING,
                 backend="dnn",
                 similarity_threshold=BROWNIE_THRESHOLD,
-                standalone=True,
             )
             if brownie_id.reference_embedding is not None:
                 print(f"\n{'='*60}", file=sys.stderr)
@@ -89,7 +96,7 @@ if not DISABLE_BROWNIE:
 # -----------------------------------------------------------------------------------------------
 # Motion detection configuration
 # -----------------------------------------------------------------------------------------------
-ENABLE_MOTION = os.environ.get("ENABLE_MOTION", "0") not in ("0", "false", "False")
+ENABLE_MOTION = _env_bool("ENABLE_MOTION")
 MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "25"))
 MOTION_MIN_AREA = int(os.environ.get("MOTION_MIN_AREA", "1500"))
 MOTION_COOLDOWN_SECS = float(os.environ.get("MOTION_COOLDOWN", "3.0"))
@@ -230,9 +237,10 @@ def app_callback(pad, info, user_data):
         tracking_id = track[0].get_id()
         if tracking_id not in emitted_ids:
             print(f"Detection!: {tracking_id} {label} {detection.get_confidence():.2f}\n")
-            emitted_ids.add(tracking_id)
-            if len(emitted_ids) > MAX_TRACKED_IDS:
-                emitted_ids.clear()
+            emitted_ids[tracking_id] = True
+            # Evict oldest entries when limit reached
+            while len(emitted_ids) > MAX_TRACKED_IDS:
+                emitted_ids.popitem(last=False)
             if client is not None:
                 payload = {"tracking_id": tracking_id, "label": label}
                 try:

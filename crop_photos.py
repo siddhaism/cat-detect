@@ -124,7 +124,7 @@ def main():
         print(f"  {photo_path.name}: {orig_w}x{orig_h} -> {crop_w}x{crop_h}")
 
     print(f"\nCropped photos saved to {output_dir}")
-    print(f"Now run: python3 compute_embeddings.py --photos-dir {output_dir} --backend simple")
+    print(f"Now run: python3 compute_embeddings.py --photos-dir {output_dir} --backend dnn")
 
 
 if __name__ == "__main__":

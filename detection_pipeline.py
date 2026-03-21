@@ -2,6 +2,7 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import os
+import sys
 import setproctitle
 import hailo
 
@@ -105,7 +106,7 @@ class GStreamerDetectionApp(GStreamerApp):
             + "videoconvert n-threads=2 qos=false ! "
             + "shmsink socket-path=/tmp/infered.feed sync=false wait-for-connection=false"
         )
-        print(pipeline)
+        print(pipeline, file=sys.stderr)
         return pipeline
 
 if __name__ == "__main__":

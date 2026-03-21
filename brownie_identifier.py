@@ -1,3 +1,5 @@
+import sys
+import heapq
 import numpy as np
 import cv2
 import os
@@ -29,14 +31,10 @@ class BrownieIdentifier:
         model_path=None,
         backend="dnn",
         similarity_threshold=0.40,
-        cache_ttl=10.0,
-        standalone=False,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
-        self.cache_ttl = cache_ttl
         self.model_path = model_path
-        self.standalone = standalone
 
         # Tracking cache: tracking_id -> (is_brownie, best_similarity, check_count, timestamp)
         self._cache = {}
@@ -57,18 +55,6 @@ class BrownieIdentifier:
             if norm > 0:
                 self.reference_embedding = self.reference_embedding / norm
             print(f"Loaded Brownie reference embedding: shape={self.reference_embedding.shape}")
-
-            # Validate dimensions match the backend
-            if backend == "dnn":
-                if self.reference_embedding.shape[0] not in (1000, 1280):
-                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} not valid for dnn backend (expected 1000 or 1280).")
-                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend dnn")
-                    self.reference_embedding = None
-            elif backend == "simple":
-                if self.reference_embedding.shape[0] != 252:
-                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} != simple backend dim=252.")
-                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend simple")
-                    self.reference_embedding = None
         else:
             self.reference_embedding = None
             print("Warning: No reference embedding loaded. Brownie ID will not work.")
@@ -76,19 +62,30 @@ class BrownieIdentifier:
         # Initialize backend
         if backend == "dnn":
             self._init_dnn()
-            # Check if embedding dim matches extraction dim
-            if self._ort_session is not None and self.reference_embedding is not None:
-                expected_dim = 1280 if self._penultimate_output else 1000
-                if self.reference_embedding.shape[0] != expected_dim:
-                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} "
-                          f"but model extracts {expected_dim}-dim features.")
-                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend dnn")
-                    self.reference_embedding = None
-            # Start background inference thread for pipeline use
-            if self._ort_session is not None and self.reference_embedding is not None:
-                self._start_infer_thread()
         elif backend == "simple":
             print("Brownie identifier using simple (OpenCV histogram) backend.")
+
+        # Validate embedding dimensions match the actual backend after init
+        # (backend may have fallen back from dnn to simple if model not found)
+        if self.reference_embedding is not None:
+            expected_dim = self._get_expected_dim()
+            if self.reference_embedding.shape[0] != expected_dim:
+                print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} "
+                      f"but {self.backend} backend extracts {expected_dim}-dim features.")
+                print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend {self.backend}")
+                self.reference_embedding = None
+
+        # Start background inference thread for pipeline use
+        if self.backend == "dnn" and self._ort_session is not None and self.reference_embedding is not None:
+            self._start_infer_thread()
+
+    def _get_expected_dim(self):
+        """Return expected embedding dimension for the current backend config."""
+        if self.backend == "dnn":
+            return 1280 if self._penultimate_output else 1000
+        elif self.backend == "simple":
+            return 252
+        return 0
 
     def _init_dnn(self):
         """Load MobileNetV2 ONNX model via ONNX Runtime.
@@ -132,6 +129,7 @@ class BrownieIdentifier:
                         break
                 if self._penultimate_output:
                     print(f"  Found penultimate layer: {self._penultimate_output} (1280-dim features)")
+                del model
             except ImportError:
                 print("  Note: 'onnx' package not installed; using 1000-dim logits.")
                 print("  For better accuracy, install: pip install onnx")
@@ -180,10 +178,8 @@ class BrownieIdentifier:
                     similarity = float(np.dot(embedding, self.reference_embedding))
                     is_brownie = similarity >= self.similarity_threshold
                     self.cache_result(track_id, is_brownie, similarity)
-                    import sys
                     print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
             except Exception as e:
-                import sys
                 print(f"Brownie DNN error: {e}", file=sys.stderr)
 
     def submit_async(self, tracking_id, crop_rgb):
@@ -254,22 +250,21 @@ class BrownieIdentifier:
             for col in range(grid):
                 y1, y2 = row * cell_h, (row + 1) * cell_h
                 x1, x2 = col * cell_w, (col + 1) * cell_w
-                cell = hsv[y1:y2, x1:x2]
-                h_hist = cv2.calcHist([cell], [0], None, [12], [0, 180]).flatten()
-                s_hist = cv2.calcHist([cell], [1], None, [8], [0, 256]).flatten()
+
+                # Color histograms (H and S channels)
+                cell_hsv = hsv[y1:y2, x1:x2]
+                h_hist = cv2.calcHist([cell_hsv], [0], None, [12], [0, 180]).flatten()
+                s_hist = cv2.calcHist([cell_hsv], [1], None, [8], [0, 256]).flatten()
                 for h in [h_hist, s_hist]:
                     total = h.sum()
                     if total > 0:
                         h /= total
                 all_features.extend([h_hist, s_hist])
 
-        for row in range(grid):
-            for col in range(grid):
-                y1, y2 = row * cell_h, (row + 1) * cell_h
-                x1, x2 = col * cell_w, (col + 1) * cell_w
-                cell = gray[y1:y2, x1:x2]
-                gx = cv2.Sobel(cell, cv2.CV_32F, 1, 0, ksize=3)
-                gy = cv2.Sobel(cell, cv2.CV_32F, 0, 1, ksize=3)
+                # Gradient histogram
+                cell_gray = gray[y1:y2, x1:x2]
+                gx = cv2.Sobel(cell_gray, cv2.CV_32F, 1, 0, ksize=3)
+                gy = cv2.Sobel(cell_gray, cv2.CV_32F, 0, 1, ksize=3)
                 mag = np.sqrt(gx ** 2 + gy ** 2)
                 angle = np.arctan2(gy, gx) * 180 / np.pi + 180
                 grad_hist = np.histogram(angle, bins=8, range=(0, 360), weights=mag)[0].astype(np.float32)
@@ -311,7 +306,7 @@ class BrownieIdentifier:
     def cache_result(self, tracking_id, is_brownie, similarity=0.0):
         """Cache identification result, keeping the best similarity score."""
         if len(self._cache) > self._max_cache:
-            oldest = sorted(self._cache, key=lambda k: self._cache[k][3])[:100]
+            oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][3])
             for k in oldest:
                 del self._cache[k]
         if tracking_id in self._cache:

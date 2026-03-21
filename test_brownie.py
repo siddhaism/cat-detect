@@ -30,10 +30,8 @@ else:
 try:
     bi = BrownieIdentifier(
         embedding_path=embedding_path,
-        model_path="",
-        backend="simple",
-        similarity_threshold=0.30,
-        standalone=True,
+        backend="dnn",
+        similarity_threshold=0.40,
     )
     if bi.reference_embedding is not None:
         print(f"[OK] BrownieIdentifier created (ref dim={bi.reference_embedding.shape[0]})")
