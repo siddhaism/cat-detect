@@ -368,10 +368,13 @@ class BrownieIdentifier:
     # --- Tracking cache ---
 
     def should_check(self, tracking_id):
-        """Rate-limit: only check once per tracking ID, or re-check after TTL."""
+        """Rate-limit: only check once per tracking ID, or re-check after TTL.
+        Never re-check tracks already identified as Brownie (score fluctuates with angle)."""
         if tracking_id not in self._cache:
             return True
-        _, ts = self._cache[tracking_id]
+        is_brownie, ts = self._cache[tracking_id]
+        if is_brownie:
+            return False  # Keep positive identification permanently
         return (time.time() - ts) > self.cache_ttl
 
     def cache_result(self, tracking_id, is_brownie):
