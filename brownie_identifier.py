@@ -2,6 +2,8 @@ import numpy as np
 import cv2
 import os
 import time
+import threading
+import queue
 
 
 # ImageNet normalization constants
@@ -13,9 +15,9 @@ class BrownieIdentifier:
     """
     Identifies whether a detected cat is "Brownie" using embedding comparison.
 
-    Backend "dnn": Uses MobileNetV2 ONNX via OpenCV DNN (runs on CPU).
-                   Produces 1000-dim embeddings from ImageNet classification logits.
-                   Much more discriminative than color histograms.
+    Backend "dnn": Uses MobileNetV2 ONNX via ONNX Runtime (runs on CPU).
+                   Inference runs in a background thread to avoid blocking
+                   the GStreamer pipeline callback.
 
     Backend "simple": Uses spatial color + texture histograms (252-dim, CPU only).
                       Fast but less discriminative for similar-looking cats.
@@ -40,8 +42,12 @@ class BrownieIdentifier:
         self._cache = {}
         self._max_cache = 500
 
-        # DNN model (loaded lazily)
+        # DNN model
         self._ort_session = None
+
+        # Async inference queue (for DNN backend in pipeline mode)
+        self._infer_queue = None
+        self._infer_thread = None
 
         # Load reference embedding
         if embedding_path and os.path.exists(embedding_path):
@@ -66,9 +72,12 @@ class BrownieIdentifier:
             self.reference_embedding = None
             print("Warning: No reference embedding loaded. Brownie ID will not work.")
 
-        # Initialize DNN backend
+        # Initialize backend
         if backend == "dnn":
             self._init_dnn()
+            # Start background inference thread (for non-standalone/pipeline mode)
+            if not standalone and self._ort_session is not None:
+                self._start_infer_thread()
         elif backend == "simple":
             print("Brownie identifier using simple (OpenCV histogram) backend.")
 
@@ -112,9 +121,52 @@ class BrownieIdentifier:
             self.backend = "simple"
             self._ort_session = None
 
+    def _start_infer_thread(self):
+        """Start background thread for async DNN inference."""
+        self._infer_queue = queue.Queue(maxsize=4)
+        self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)
+        self._infer_thread.start()
+        print("DNN inference thread started (non-blocking pipeline mode)")
+
+    def _infer_worker(self):
+        """Background thread that processes DNN inference requests."""
+        while True:
+            try:
+                item = self._infer_queue.get(timeout=5.0)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            track_id, crop_rgb = item
+            try:
+                embedding = self._extract_dnn_features(crop_rgb)
+                if self.reference_embedding is not None:
+                    similarity = float(np.dot(embedding, self.reference_embedding))
+                    is_brownie = similarity >= self.similarity_threshold
+                    self.cache_result(track_id, is_brownie, similarity)
+                    import sys
+                    print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
+            except Exception as e:
+                import sys
+                print(f"Brownie DNN error: {e}", file=sys.stderr)
+
+    def submit_async(self, tracking_id, crop_rgb):
+        """Submit a crop for async DNN inference (non-blocking)."""
+        if self._infer_queue is not None:
+            try:
+                self._infer_queue.put_nowait((tracking_id, crop_rgb))
+                return True
+            except queue.Full:
+                return False
+        return False
+
     def close(self):
         """Clean up resources."""
-        pass
+        if self._infer_queue is not None:
+            try:
+                self._infer_queue.put_nowait(None)
+            except queue.Full:
+                pass
 
     def __del__(self):
         self.close()
@@ -122,28 +174,18 @@ class BrownieIdentifier:
     # --- Embedding extraction ---
 
     def get_embedding(self, crop_rgb):
-        """Extract features from an image crop."""
+        """Extract features from an image crop (synchronous — for compute_embeddings)."""
         if self.backend == "dnn" and self._ort_session is not None:
             return self._extract_dnn_features(crop_rgb)
         return self._extract_simple_features(crop_rgb)
 
     def _extract_dnn_features(self, crop_rgb):
-        """Extract features using MobileNetV2 ONNX on CPU via ONNX Runtime.
-
-        Produces 1000-dim embedding from ImageNet classification logits.
-        These capture high-level visual features (texture, shape, color patterns)
-        far better than hand-crafted histograms.
-        """
-        # Preprocess: resize, normalize with ImageNet stats
+        """Extract features using MobileNetV2 ONNX on CPU via ONNX Runtime."""
         img = cv2.resize(crop_rgb, (224, 224)).astype(np.float32) / 255.0
         img = (img - _MEAN) / _STD
-
-        # ONNX Runtime expects NCHW float32
-        img_chw = np.transpose(img, (2, 0, 1))  # HWC -> CHW
-        input_tensor = np.expand_dims(img_chw, 0)  # Add batch dim
-
+        img_chw = np.transpose(img, (2, 0, 1))
+        input_tensor = np.expand_dims(img_chw, 0)
         output = self._ort_session.run(None, {self._ort_input_name: input_tensor})
-
         embedding = output[0].flatten().astype(np.float32)
         norm = np.linalg.norm(embedding)
         if norm > 0:

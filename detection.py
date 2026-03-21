@@ -214,11 +214,8 @@ def app_callback(pad, info, user_data):
                     y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
                     if x2 > x1 and y2 > y1:
                         crop = frame[y1:y2, x1:x2].copy()
-                        is_brownie, similarity = brownie_id.is_brownie(crop)
-                        brownie_id.cache_result(track_id, is_brownie, similarity)
-                        print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
-                        if is_brownie:
-                            _relabel_detection(roi, detection, "Brownie")
+                        # Submit to background thread (non-blocking)
+                        brownie_id.submit_async(track_id, crop)
                 except Exception as e:
                     print(f"Brownie ID error: {e}", file=sys.stderr)
             elif brownie_id.get_cached_result(track_id):
