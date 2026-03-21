@@ -104,10 +104,13 @@ class BrownieIdentifier:
         self._input_queue = None
         self._result_queue = None
         self._hailo_direct = None
+        self._hailo_lazy = False
 
         if backend == "hailo":
             if standalone:
-                self._init_hailo_direct()
+                # Defer Hailo init to first use so hailonet can claim the device first
+                self._hailo_lazy = True
+                print("Hailo embedding model will initialize on first use (deferred).")
             else:
                 self._start_hailo_worker()
         elif backend == "simple":
@@ -188,7 +191,12 @@ class BrownieIdentifier:
         """Extract features from an image crop."""
         if self.backend == "simple":
             return self._extract_simple_features(crop_rgb)
-        elif self._hailo_direct:
+        # Lazy init: create Hailo VDevice on first use (after hailonet has started)
+        if self._hailo_lazy and not self._hailo_direct:
+            print("Initializing Hailo embedding model (deferred)...", flush=True)
+            self._init_hailo_direct()
+            self._hailo_lazy = False
+        if self._hailo_direct:
             # Direct Hailo inference (standalone mode)
             InferVStreams = self._hailo_imports["InferVStreams"]
             InputVStreamParams = self._hailo_imports["InputVStreamParams"]
