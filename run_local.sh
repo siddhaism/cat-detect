@@ -175,7 +175,11 @@ export DISABLE_BROWNIE="$DISABLE_BROWNIE"
 [[ "$ENABLE_MOTION" -eq 1 ]] && export ENABLE_MOTION=1
 [[ -n "$MOTION_THRESHOLD" ]]  && export MOTION_THRESHOLD="$MOTION_THRESHOLD"
 [[ -n "$MOTION_COOLDOWN" ]]   && export MOTION_COOLDOWN="$MOTION_COOLDOWN"
-python3 -u "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
+EMBEDDING_HEF_ARG=()
+if [[ -n "$BROWNIE_MODEL" && "$BROWNIE_BACKEND" == "hailo" ]]; then
+  EMBEDDING_HEF_ARG=("--embedding-hef" "$BROWNIE_MODEL")
+fi
+python3 -u "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" "${EMBEDDING_HEF_ARG[@]}" &
 P_DETECT=$!
 
 # --- Wait for inference shared memory to be ready ---

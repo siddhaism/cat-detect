@@ -60,6 +60,7 @@ else:
 # Brownie identification setup
 # -----------------------------------------------------------------------------------------------
 brownie_id = None
+brownie_ref_embedding = None  # For pipeline cascade mode (ResNet in GStreamer)
 BROWNIE_EMBEDDING = os.environ.get(
     "BROWNIE_EMBEDDING",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
@@ -72,12 +73,30 @@ BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "simple") or "simple"
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
-if not DISABLE_BROWNIE:
+# Pipeline cascade mode: ResNet runs inside the GStreamer pipeline, we just read embeddings
+# from buffer metadata in the callback. No separate VDevice needed.
+USE_PIPELINE_CASCADE = BROWNIE_BACKEND == "hailo" and not DISABLE_BROWNIE
+
+if USE_PIPELINE_CASCADE:
+    # Load reference embedding for direct comparison in callback
+    if os.path.exists(BROWNIE_EMBEDDING):
+        brownie_ref_embedding = np.load(BROWNIE_EMBEDDING).astype(np.float32)
+        norm = np.linalg.norm(brownie_ref_embedding)
+        if norm > 0:
+            brownie_ref_embedding = brownie_ref_embedding / norm
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"  BROWNIE ID (PIPELINE CASCADE): dim={brownie_ref_embedding.shape[0]}, "
+              f"threshold={BROWNIE_THRESHOLD}", file=sys.stderr)
+        print(f"{'='*60}\n", file=sys.stderr)
+    else:
+        print(f"Brownie embedding not found at {BROWNIE_EMBEDDING} — cascade disabled.")
+        USE_PIPELINE_CASCADE = False
+
+elif not DISABLE_BROWNIE:
+    # Simple backend: use BrownieIdentifier with histogram features
     _missing = []
     if not os.path.exists(BROWNIE_EMBEDDING):
         _missing.append(f"embedding not found at {BROWNIE_EMBEDDING}")
-    if BROWNIE_BACKEND != "simple" and not os.path.exists(BROWNIE_MODEL):
-        _missing.append(f"model not found at {BROWNIE_MODEL}")
 
     if not _missing:
         try:
@@ -85,27 +104,20 @@ if not DISABLE_BROWNIE:
             brownie_id = BrownieIdentifier(
                 embedding_path=BROWNIE_EMBEDDING,
                 model_path=BROWNIE_MODEL,
-                backend=BROWNIE_BACKEND,
+                backend="simple",
                 similarity_threshold=BROWNIE_THRESHOLD,
                 standalone=True,
             )
             if brownie_id.reference_embedding is not None:
                 print(f"\n{'='*60}", file=sys.stderr)
-                print(f"  BROWNIE ID ACTIVE: backend={BROWNIE_BACKEND}, "
+                print(f"  BROWNIE ID ACTIVE: backend=simple, "
                       f"dim={brownie_id.reference_embedding.shape[0]}, "
                       f"threshold={BROWNIE_THRESHOLD}", file=sys.stderr)
                 print(f"{'='*60}\n", file=sys.stderr)
             else:
-                print(f"\n{'='*60}", file=sys.stderr)
-                print(f"  BROWNIE ID DISABLED: no valid reference embedding", file=sys.stderr)
-                print(f"  Run: python3 compute_embeddings.py "
-                      f"--photos-dir ~/brownie_photos/ --backend simple", file=sys.stderr)
-                print(f"{'='*60}\n", file=sys.stderr)
                 brownie_id = None
         except Exception as e:
-            print(f"\n{'='*60}", file=sys.stderr)
-            print(f"  BROWNIE ID FAILED: {e}", file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
+            print(f"BROWNIE ID FAILED: {e}", file=sys.stderr)
             brownie_id = None
     else:
         for m in _missing:
@@ -132,8 +144,9 @@ if ENABLE_MOTION:
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
-        # Always enable frame access so we can draw bounding boxes via OpenCV
-        self.use_frame = True
+        # Enable frame access for motion detection and simple-backend brownie ID
+        if brownie_id is not None or ENABLE_MOTION:
+            self.use_frame = True
 
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
@@ -268,25 +281,37 @@ def app_callback(pad, info, user_data):
         if detection.get_label() not in target_classes:
             roi.remove_object(detection)
 
-    # Debug: log frame access and detection info (first few frames only)
-    if filtered_detections and user_data.get_count() <= 10:
-        det = filtered_detections[0]
-        bbox = det.get_bbox()
-        print(f"Frame={'OK' if frame is not None else 'NONE'}, "
-              f"detections_in_roi={len(roi.get_objects_typed(hailo.HAILO_DETECTION))}, "
-              f"bbox=({bbox.xmin():.3f},{bbox.ymin():.3f},{bbox.width():.3f},{bbox.height():.3f}), "
-              f"all_roi_objects={len(roi.get_objects())}",
-              file=sys.stderr)
-
     for detection in filtered_detections:
         label = detection.get_label()
+        track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+        track_id = track[0].get_id() if track else None
 
-        # --- Brownie identification ---
-        if brownie_id is not None and frame is not None:
-            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-            track_id = track[0].get_id() if track else None
+        # --- Brownie identification (pipeline cascade mode) ---
+        # ResNet embeddings are attached as HailoTensor sub-objects by the second hailonet
+        if USE_PIPELINE_CASCADE and brownie_ref_embedding is not None and track_id is not None:
+            tensors = detection.get_objects_typed(hailo.HAILO_TENSOR)
+            if tensors:
+                try:
+                    raw = np.array(tensors[0].data(), dtype=np.float32).flatten()
+                    norm = np.linalg.norm(raw)
+                    if norm > 0:
+                        raw = raw / norm
+                    similarity = float(np.dot(raw, brownie_ref_embedding))
+                    is_brownie = similarity >= BROWNIE_THRESHOLD
+                    print(f"Brownie check (cascade): track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
+                    if is_brownie:
+                        detection = _relabel_detection(roi, detection, "Brownie")
+                        label = "Brownie"
+                except Exception as e:
+                    print(f"Brownie cascade error: {e}", file=sys.stderr)
+            elif user_data.get_count() <= 5:
+                # Debug: log when no tensors found (first few detections only)
+                sub_types = [type(o).__name__ for o in detection.get_objects()]
+                print(f"Brownie cascade: no tensors on detection (sub-objects: {sub_types})", file=sys.stderr)
 
-            if track_id is not None and brownie_id.should_check(track_id):
+        # --- Brownie identification (simple backend mode) ---
+        elif brownie_id is not None and frame is not None and track_id is not None:
+            if brownie_id.should_check(track_id):
                 try:
                     bbox = detection.get_bbox()
                     x1 = max(0, int(bbox.xmin() * width))
@@ -304,7 +329,7 @@ def app_callback(pad, info, user_data):
                             label = "Brownie"
                 except Exception as e:
                     print(f"Brownie ID error: {e}", file=sys.stderr)
-            elif track_id is not None and brownie_id.get_cached_result(track_id):
+            elif brownie_id.get_cached_result(track_id):
                 detection = _relabel_detection(roi, detection, "Brownie")
                 label = "Brownie"
 
