@@ -36,7 +36,7 @@ class GStreamerDetectionApp(GStreamerApp):
         self.network_width = 640
         self.network_height = 640
         self.network_format = "RGB"
-        nms_score_threshold = 0.3
+        nms_score_threshold = 0.15
         nms_iou_threshold = 0.45
 
         # Determine the architecture if not specified

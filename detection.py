@@ -257,6 +257,13 @@ def app_callback(pad, info, user_data):
         label = detection.get_label()
 
         # --- Brownie identification ---
+        if brownie_id is not None:
+            if frame is None:
+                print(f"Brownie skip: frame is None (format={format}, w={width}, h={height})", file=sys.stderr)
+            else:
+                track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+                track_id = track[0].get_id() if track else None
+                print(f"Brownie debug: track_id={track_id}, should_check={brownie_id.should_check(track_id) if track_id else 'N/A'}", file=sys.stderr)
         if brownie_id is not None and frame is not None:
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             track_id = track[0].get_id() if track else None
