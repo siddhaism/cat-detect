@@ -70,13 +70,15 @@ BROWNIE_EMBEDDING = os.environ.get(
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.40"))
 DISABLE_BROWNIE = _env_bool("DISABLE_BROWNIE")
 
+BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "hailo")  # hailo -> dnn -> simple
+
 if not DISABLE_BROWNIE:
     if os.path.exists(BROWNIE_EMBEDDING):
         try:
             from brownie_identifier import BrownieIdentifier
             brownie_id = BrownieIdentifier(
                 embedding_path=BROWNIE_EMBEDDING,
-                backend="dnn",
+                backend=BROWNIE_BACKEND,
                 similarity_threshold=BROWNIE_THRESHOLD,
             )
             if brownie_id.reference_embedding is not None:

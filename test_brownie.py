@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
-"""Quick diagnostic for Brownie identification."""
+"""Quick diagnostic for Brownie identification.
+
+Usage:
+  python3 test_brownie.py                    # Auto-detect backend (hailo -> dnn -> simple)
+  python3 test_brownie.py --backend hailo    # Force Hailo backend
+  python3 test_brownie.py --backend dnn      # Force CPU/onnxruntime backend
+"""
+import argparse
 import numpy as np
 import cv2
 import os
 import sys
 
-print("=== Brownie Identifier Diagnostic ===\n")
+parser = argparse.ArgumentParser(description="Brownie identifier diagnostic")
+parser.add_argument("--backend", default="hailo", choices=["hailo", "dnn", "simple"],
+                    help="Backend to test (default: hailo)")
+parser.add_argument("--threshold", type=float, default=0.40,
+                    help="Similarity threshold (default: 0.40)")
+parser.add_argument("--photos-dir", default=os.path.expanduser("~/brownie_photos"),
+                    help="Directory with Brownie test photos")
+args = parser.parse_args()
+
+print(f"=== Brownie Identifier Diagnostic (backend={args.backend}) ===\n")
 
 # Test 1: Import
 try:
@@ -30,28 +46,30 @@ else:
 try:
     bi = BrownieIdentifier(
         embedding_path=embedding_path,
-        backend="dnn",
-        similarity_threshold=0.40,
+        backend=args.backend,
+        similarity_threshold=args.threshold,
     )
-    if bi.reference_embedding is not None:
-        print(f"[OK] BrownieIdentifier created (ref dim={bi.reference_embedding.shape[0]})")
-    else:
-        print("[FAIL] reference_embedding is None!")
+    print(f"[OK] BrownieIdentifier created (backend={bi.backend}, "
+          f"ref dim={bi.reference_embedding.shape[0] if bi.reference_embedding is not None else 'None'})")
+    if bi.reference_embedding is None:
+        print("[FAIL] reference_embedding is None! Dimension mismatch or model not found.")
+        print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend {bi.backend}")
         sys.exit(1)
 except Exception as e:
     print(f"[FAIL] Creation failed: {e}")
     sys.exit(1)
 
 # Test 4: Test against Brownie photos
-photo_dir = os.path.expanduser("~/brownie_photos")
-if not os.path.exists(photo_dir):
-    print(f"\n[FAIL] Photo directory not found: {photo_dir}")
-    sys.exit(1)
+if not os.path.exists(args.photos_dir):
+    print(f"\n[SKIP] Photo directory not found: {args.photos_dir}")
+    print("  Pass --photos-dir to specify a different directory.")
+    sys.exit(0)
 
-photos = sorted([f for f in os.listdir(photo_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-print(f"\n=== Testing against {len(photos)} Brownie photos ===")
+extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+photos = sorted([f for f in os.listdir(args.photos_dir) if f.lower().endswith(extensions)])
+print(f"\n=== Testing against {len(photos)} photos (backend={bi.backend}) ===")
 for photo in photos:
-    path = os.path.join(photo_dir, photo)
+    path = os.path.join(args.photos_dir, photo)
     img = cv2.imread(path)
     if img is None:
         continue
@@ -60,5 +78,5 @@ for photo in photos:
     status = "BROWNIE" if is_brownie else "not brownie"
     print(f"  {photo:20s} sim={similarity:.3f}  -->  {status}")
 
-print("\nIf most photos above show 'BROWNIE', the identifier works.")
-print("If they show 'not brownie', the threshold needs lowering or the approach needs changing.")
+print(f"\nBackend: {bi.backend} | Threshold: {args.threshold}")
+print("If most photos show 'BROWNIE', the identifier works.")

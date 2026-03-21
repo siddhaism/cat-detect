@@ -17,19 +17,26 @@ class BrownieIdentifier:
     """
     Identifies whether a detected cat is "Brownie" using embedding comparison.
 
-    Backend "dnn": Uses MobileNetV2 ONNX via ONNX Runtime (runs on CPU).
-                   Inference runs in a background thread to avoid blocking
-                   the GStreamer pipeline callback.
+    Backend "hailo": Uses MobileNetV2 HEF on the Hailo-8 accelerator via HailoRT.
+                     Fastest option (~2-5ms per crop). Requires a compiled HEF file
+                     and the hailo_platform package. Uses scheduler to share the
+                     device with GStreamer's hailonet (YOLO).
+
+    Backend "dnn":   Uses MobileNetV2 ONNX via ONNX Runtime (runs on CPU).
+                     Slower (~200-500ms) but no HEF compilation needed.
 
     Backend "simple": Uses spatial color + texture histograms (252-dim, CPU only).
                       Fast but less discriminative for similar-looking cats.
+
+    All backends run inference in a background thread to avoid blocking
+    the GStreamer pipeline callback.
     """
 
     def __init__(
         self,
         embedding_path,
         model_path=None,
-        backend="dnn",
+        backend="hailo",
         similarity_threshold=0.40,
     ):
         self.similarity_threshold = similarity_threshold
@@ -40,11 +47,16 @@ class BrownieIdentifier:
         self._cache = {}
         self._max_cache = 500
 
-        # DNN model
+        # DNN model (onnxruntime)
         self._ort_session = None
         self._penultimate_output = None
 
-        # Async inference queue (for DNN backend in pipeline mode)
+        # Hailo model
+        self._hailo_configured = None
+        self._hailo_vdevice = None
+        self._hailo_input_shape = None
+
+        # Async inference queue
         self._infer_queue = None
         self._infer_thread = None
 
@@ -59,14 +71,18 @@ class BrownieIdentifier:
             self.reference_embedding = None
             print("Warning: No reference embedding loaded. Brownie ID will not work.")
 
-        # Initialize backend
-        if backend == "dnn":
+        # Initialize backend (with fallback chain: hailo -> dnn -> simple)
+        if backend == "hailo":
+            self._init_hailo()
+            if self.backend != "hailo":
+                # Hailo init failed, try dnn fallback
+                self._init_dnn()
+        elif backend == "dnn":
             self._init_dnn()
         elif backend == "simple":
             print("Brownie identifier using simple (OpenCV histogram) backend.")
 
         # Validate embedding dimensions match the actual backend after init
-        # (backend may have fallen back from dnn to simple if model not found)
         if self.reference_embedding is not None:
             expected_dim = self._get_expected_dim()
             if self.reference_embedding.shape[0] != expected_dim:
@@ -75,17 +91,129 @@ class BrownieIdentifier:
                 print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend {self.backend}")
                 self.reference_embedding = None
 
-        # Start background inference thread for pipeline use
-        if self.backend == "dnn" and self._ort_session is not None and self.reference_embedding is not None:
+        # Start background inference thread
+        if self._can_infer() and self.reference_embedding is not None:
             self._start_infer_thread()
+
+    def _can_infer(self):
+        """Check if the backend is ready for inference."""
+        if self.backend == "hailo":
+            return self._hailo_configured is not None
+        elif self.backend == "dnn":
+            return self._ort_session is not None
+        return True  # simple backend always works
 
     def _get_expected_dim(self):
         """Return expected embedding dimension for the current backend config."""
-        if self.backend == "dnn":
+        if self.backend == "hailo":
+            return 1000
+        elif self.backend == "dnn":
             return 1280 if self._penultimate_output else 1000
         elif self.backend == "simple":
             return 252
         return 0
+
+    # --- Hailo backend ---
+
+    def _init_hailo(self):
+        """Load MobileNetV2 HEF on the Hailo-8 via hailo_platform.
+
+        Uses the HailoRT scheduler to share the device with GStreamer's
+        hailonet element (which runs YOLO).
+        """
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            self.model_path,
+            os.path.join(script_dir, "mobilenet_v2.hef"),
+            os.path.expanduser("~/mobilenet_v2.hef"),
+            # Hailo model zoo default locations
+            os.path.join(script_dir, "mobilenetv2.hef"),
+            "/usr/share/hailo-models/mobilenet_v2.hef",
+        ]
+        hef_path = None
+        for c in candidates:
+            if c and os.path.exists(c):
+                hef_path = c
+                break
+
+        if hef_path is None:
+            print("MobileNetV2 HEF not found. Searched:")
+            for c in candidates:
+                if c:
+                    print(f"  - {c}")
+            print("  Download with: python3 download_model.py --hailo")
+            print("  Falling back to dnn (CPU) backend.")
+            self.backend = "dnn"
+            return
+
+        try:
+            from hailo_platform import (
+                HEF,
+                VDevice,
+                HailoSchedulingAlgorithm,
+                FormatType,
+            )
+
+            # Load HEF and inspect
+            hef = HEF(hef_path)
+
+            # Create VDevice with round-robin scheduler for multi-model sharing
+            params = VDevice.create_params()
+            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+            self._hailo_vdevice = VDevice(params)
+
+            # Create and configure the inference model
+            infer_model = self._hailo_vdevice.create_infer_model(hef_path)
+
+            # Set output to float32 so HailoRT handles dequantization
+            infer_model.output().set_format_type(FormatType.FLOAT32)
+
+            self._hailo_configured = infer_model.configure()
+
+            # Get expected input shape for preprocessing
+            input_info = infer_model.input()
+            self._hailo_input_shape = input_info.shape  # e.g., (224, 224, 3) or (1, 224, 224, 3)
+
+            print(f"Brownie identifier using HAILO backend (HailoRT, 1000-dim): {os.path.basename(hef_path)}")
+            print(f"  Input shape: {self._hailo_input_shape}")
+
+        except ImportError:
+            print("hailo_platform not installed — Hailo backend unavailable.")
+            print("  Falling back to dnn (CPU) backend.")
+            self.backend = "dnn"
+        except Exception as e:
+            print(f"ERROR initializing Hailo backend: {e}")
+            print("  Falling back to dnn (CPU) backend.")
+            self.backend = "dnn"
+            self._hailo_configured = None
+            self._hailo_vdevice = None
+
+    def _extract_hailo_features(self, crop_rgb):
+        """Extract features using MobileNetV2 on the Hailo-8 accelerator.
+
+        The HEF model includes quantization, so we send uint8 RGB input.
+        HailoRT handles dequantization of the output to float32.
+        """
+        # Resize to model input size (typically 224x224)
+        input_h = self._hailo_input_shape[0] if len(self._hailo_input_shape) == 3 else self._hailo_input_shape[1]
+        input_w = self._hailo_input_shape[1] if len(self._hailo_input_shape) == 3 else self._hailo_input_shape[2]
+        img = cv2.resize(crop_rgb, (input_w, input_h))
+
+        # HEF expects uint8 RGB — quantization is baked into the model
+        input_data = np.expand_dims(img.astype(np.uint8), 0)
+
+        bindings = self._hailo_configured.create_bindings()
+        bindings.input().set_buffer(input_data)
+        self._hailo_configured.run([bindings])
+
+        output = bindings.output().get_buffer()
+        embedding = output.flatten().astype(np.float32)
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding
+
+    # --- DNN (onnxruntime) backend ---
 
     def _init_dnn(self):
         """Load MobileNetV2 ONNX model via ONNX Runtime.
@@ -122,7 +250,6 @@ class BrownieIdentifier:
             try:
                 import onnx
                 model = onnx.load(onnx_path)
-                # Find the last Gemm node (final classifier) and use its input
                 for node in reversed(model.graph.node):
                     if node.op_type == "Gemm":
                         self._penultimate_output = node.input[0]
@@ -155,74 +282,14 @@ class BrownieIdentifier:
             self.backend = "simple"
             self._ort_session = None
 
-    def _start_infer_thread(self):
-        """Start background thread for async DNN inference."""
-        self._infer_queue = queue.Queue(maxsize=4)
-        self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)
-        self._infer_thread.start()
-        print("DNN inference thread started (non-blocking pipeline mode)")
-
-    def _infer_worker(self):
-        """Background thread that processes DNN inference requests."""
-        while True:
-            try:
-                item = self._infer_queue.get(timeout=5.0)
-            except queue.Empty:
-                continue
-            if item is None:
-                break
-            track_id, crop_rgb = item
-            try:
-                embedding = self._extract_dnn_features(crop_rgb)
-                if self.reference_embedding is not None:
-                    similarity = float(np.dot(embedding, self.reference_embedding))
-                    is_brownie = similarity >= self.similarity_threshold
-                    self.cache_result(track_id, is_brownie, similarity)
-                    print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
-            except Exception as e:
-                print(f"Brownie DNN error: {e}", file=sys.stderr)
-
-    def submit_async(self, tracking_id, crop_rgb):
-        """Submit a crop for async DNN inference (non-blocking)."""
-        if self._infer_queue is not None:
-            try:
-                self._infer_queue.put_nowait((tracking_id, crop_rgb))
-                return True
-            except queue.Full:
-                return False
-        return False
-
-    def close(self):
-        """Clean up resources."""
-        if self._infer_queue is not None:
-            try:
-                self._infer_queue.put_nowait(None)
-            except queue.Full:
-                pass
-
-    def __del__(self):
-        self.close()
-
-    # --- Embedding extraction ---
-
-    def get_embedding(self, crop_rgb):
-        """Extract features from an image crop (synchronous — for compute_embeddings)."""
-        if self.backend == "dnn" and self._ort_session is not None:
-            return self._extract_dnn_features(crop_rgb)
-        return self._extract_simple_features(crop_rgb)
-
     def _extract_dnn_features(self, crop_rgb):
-        """Extract features using MobileNetV2 ONNX on CPU via ONNX Runtime.
-
-        Uses penultimate layer (1280-dim) if available, otherwise logits (1000-dim).
-        """
+        """Extract features using MobileNetV2 ONNX on CPU via ONNX Runtime."""
         img = cv2.resize(crop_rgb, (224, 224)).astype(np.float32) / 255.0
         img = (img - _MEAN) / _STD
         img_chw = np.transpose(img, (2, 0, 1))
         input_tensor = np.expand_dims(img_chw, 0)
 
         if self._penultimate_output:
-            # Extract 1280-dim penultimate features (much better for similarity)
             output = self._ort_session.run(
                 [self._penultimate_output],
                 {self._ort_input_name: input_tensor},
@@ -235,6 +302,8 @@ class BrownieIdentifier:
         if norm > 0:
             embedding = embedding / norm
         return embedding
+
+    # --- Simple (histogram) backend ---
 
     def _extract_simple_features(self, crop_rgb):
         """Extract spatial color + texture features using OpenCV. No model needed."""
@@ -278,6 +347,71 @@ class BrownieIdentifier:
         if norm > 0:
             features = features / norm
         return features.astype(np.float32)
+
+    # --- Async inference (shared by all backends) ---
+
+    def _start_infer_thread(self):
+        """Start background thread for async inference."""
+        self._infer_queue = queue.Queue(maxsize=4)
+        self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)
+        self._infer_thread.start()
+        print(f"{self.backend.upper()} inference thread started (non-blocking pipeline mode)")
+
+    def _infer_worker(self):
+        """Background thread that processes inference requests."""
+        while True:
+            try:
+                item = self._infer_queue.get(timeout=5.0)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            track_id, crop_rgb = item
+            try:
+                embedding = self.get_embedding(crop_rgb)
+                if self.reference_embedding is not None:
+                    similarity = float(np.dot(embedding, self.reference_embedding))
+                    is_brownie = similarity >= self.similarity_threshold
+                    self.cache_result(track_id, is_brownie, similarity)
+                    print(f"Brownie check [{self.backend}]: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
+            except Exception as e:
+                print(f"Brownie {self.backend} error: {e}", file=sys.stderr)
+
+    def submit_async(self, tracking_id, crop_rgb):
+        """Submit a crop for async inference (non-blocking)."""
+        if self._infer_queue is not None:
+            try:
+                self._infer_queue.put_nowait((tracking_id, crop_rgb))
+                return True
+            except queue.Full:
+                return False
+        return False
+
+    def close(self):
+        """Clean up resources."""
+        if self._infer_queue is not None:
+            try:
+                self._infer_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        if self._hailo_vdevice is not None:
+            try:
+                self._hailo_vdevice.release()
+            except Exception:
+                pass
+
+    def __del__(self):
+        self.close()
+
+    # --- Embedding extraction (dispatch) ---
+
+    def get_embedding(self, crop_rgb):
+        """Extract features from an image crop (synchronous)."""
+        if self.backend == "hailo" and self._hailo_configured is not None:
+            return self._extract_hailo_features(crop_rgb)
+        elif self.backend == "dnn" and self._ort_session is not None:
+            return self._extract_dnn_features(crop_rgb)
+        return self._extract_simple_features(crop_rgb)
 
     # --- Identification ---
 

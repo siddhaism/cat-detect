@@ -7,8 +7,8 @@ cd "$ROOT_DIR"
 print_usage() {
   cat <<EOF
 Usage: bash run_local.sh --hef /path/to/model.hef [--no-viewer] [--stream] [--arch hailo8|hailo8l]
-                         [--brownie-embedding PATH]
-                         [--brownie-threshold 0.70] [--no-brownie]
+                         [--brownie-embedding PATH] [--brownie-backend hailo|dnn|simple]
+                         [--brownie-threshold 0.40] [--no-brownie]
                          [--motion] [--motion-threshold NUM] [--motion-cooldown SECS]
 
 Starts camera producer, detection pipeline (AWS disabled), and viewer/stream.
@@ -19,6 +19,7 @@ Options:
   --stream                  Stream to MediaMTX via RTSP (view at http://<pi-ip>:8889/catcam)
   --arch VALUE              Force Hailo architecture (e.g., hailo8 or hailo8l)
   --brownie-embedding PATH  Path to brownie_embedding.npy
+  --brownie-backend VALUE   Brownie ID backend: hailo, dnn, or simple (default: hailo)
   --brownie-threshold NUM   Similarity threshold 0.0-1.0 (default: 0.40)
   --no-brownie              Disable Brownie identification
   --motion                  Enable motion detection (only process when motion detected)
@@ -32,6 +33,7 @@ LAUNCH_VIEWER=1
 ENABLE_STREAM=0
 ARCH_ARG=()
 BROWNIE_EMBEDDING="${BROWNIE_EMBEDDING:-}"
+BROWNIE_BACKEND="${BROWNIE_BACKEND:-}"
 BROWNIE_THRESHOLD="${BROWNIE_THRESHOLD:-}"
 DISABLE_BROWNIE="${DISABLE_BROWNIE:-0}"
 ENABLE_MOTION="${ENABLE_MOTION:-0}"
@@ -50,6 +52,8 @@ while [[ $# -gt 0 ]]; do
       ARCH_ARG=("--arch" "$2"); shift 2;;
     --brownie-embedding)
       BROWNIE_EMBEDDING="$2"; shift 2;;
+    --brownie-backend)
+      BROWNIE_BACKEND="$2"; shift 2;;
     --brownie-threshold)
       BROWNIE_THRESHOLD="$2"; shift 2;;
     --no-brownie)
@@ -161,6 +165,7 @@ echo "Starting detection pipeline (local, AWS disabled)..."
 export DISABLE_AWS=1
 export DISABLE_BROWNIE="$DISABLE_BROWNIE"
 [[ -n "$BROWNIE_EMBEDDING" ]] && export BROWNIE_EMBEDDING="$BROWNIE_EMBEDDING"
+[[ -n "$BROWNIE_BACKEND" ]]   && export BROWNIE_BACKEND="$BROWNIE_BACKEND"
 [[ -n "$BROWNIE_THRESHOLD" ]] && export BROWNIE_THRESHOLD="$BROWNIE_THRESHOLD"
 [[ "$ENABLE_MOTION" -eq 1 ]] && export ENABLE_MOTION=1
 [[ -n "$MOTION_THRESHOLD" ]]  && export MOTION_THRESHOLD="$MOTION_THRESHOLD"

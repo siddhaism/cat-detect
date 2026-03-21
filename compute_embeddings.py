@@ -3,6 +3,7 @@
 Compute Brownie's reference embedding from photos.
 
 Usage:
+  python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend hailo
   python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend dnn
   python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend simple
 
@@ -27,16 +28,16 @@ def main():
         "--photos-dir", required=True, help="Directory with Brownie photos"
     )
     parser.add_argument(
-        "--model", default=None, help="Path to ONNX model (optional, auto-detected for dnn backend)"
+        "--model", default=None, help="Path to model file (ONNX for dnn, HEF for hailo)"
     )
     parser.add_argument(
         "--output", default="brownie_embedding.npy", help="Output .npy file"
     )
     parser.add_argument(
         "--backend",
-        default="dnn",
-        choices=["dnn", "simple"],
-        help="Feature extraction backend (default: dnn)",
+        default="hailo",
+        choices=["hailo", "dnn", "simple"],
+        help="Feature extraction backend (default: hailo)",
     )
     args = parser.parse_args()
 
