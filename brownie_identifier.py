@@ -387,18 +387,50 @@ class BrownieIdentifier:
 
     @staticmethod
     def compute_color_histogram(crop_rgb):
-        """Compute a compact HSV color histogram for fur color comparison."""
-        img = cv2.resize(crop_rgb, (64, 64))
+        """Compute spatial color + texture features for fur pattern comparison.
+
+        Uses a 3x3 grid to capture WHERE colors appear on the cat's body,
+        not just overall color distribution. This distinguishes cats with
+        different markings even if their overall colors are similar.
+        """
+        img = cv2.resize(crop_rgb, (128, 128))
         hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-        # H: 16 bins, S: 8 bins, V: 8 bins = 32 values total
-        h_hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten()
-        s_hist = cv2.calcHist([hsv], [1], None, [8], [0, 256]).flatten()
-        v_hist = cv2.calcHist([hsv], [2], None, [8], [0, 256]).flatten()
-        hist = np.concatenate([h_hist, s_hist, v_hist]).astype(np.float32)
-        norm = np.linalg.norm(hist)
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+        all_features = []
+        grid = 3
+        cell_h, cell_w = 128 // grid, 128 // grid
+
+        for row in range(grid):
+            for col in range(grid):
+                y1, y2 = row * cell_h, (row + 1) * cell_h
+                x1, x2 = col * cell_w, (col + 1) * cell_w
+
+                cell_hsv = hsv[y1:y2, x1:x2]
+                h_hist = cv2.calcHist([cell_hsv], [0], None, [12], [0, 180]).flatten()
+                s_hist = cv2.calcHist([cell_hsv], [1], None, [8], [0, 256]).flatten()
+                for h in [h_hist, s_hist]:
+                    total = h.sum()
+                    if total > 0:
+                        h /= total
+                all_features.extend([h_hist, s_hist])
+
+                cell_gray = gray[y1:y2, x1:x2]
+                gx = cv2.Sobel(cell_gray, cv2.CV_32F, 1, 0, ksize=3)
+                gy = cv2.Sobel(cell_gray, cv2.CV_32F, 0, 1, ksize=3)
+                mag = np.sqrt(gx ** 2 + gy ** 2)
+                angle = np.arctan2(gy, gx) * 180 / np.pi + 180
+                grad_hist = np.histogram(angle, bins=8, range=(0, 360), weights=mag)[0].astype(np.float32)
+                total = grad_hist.sum()
+                if total > 0:
+                    grad_hist /= total
+                all_features.append(grad_hist)
+
+        features = np.concatenate(all_features)
+        norm = np.linalg.norm(features)
         if norm > 0:
-            hist /= norm
-        return hist
+            features /= norm
+        return features.astype(np.float32)
 
     def _color_similarity(self, crop_rgb):
         """Compare crop's color distribution to Brownie's reference colors."""
