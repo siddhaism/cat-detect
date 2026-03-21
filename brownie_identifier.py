@@ -165,9 +165,14 @@ class BrownieIdentifier:
             # Load HEF and inspect
             hef = HEF(hef_path)
 
-            # Create VDevice with round-robin scheduler for multi-model sharing
+            # Create VDevice with round-robin scheduler for multi-model sharing.
+            # Use group_id so GStreamer's hailonet can share the same VDevice.
             params = VDevice.create_params()
             params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+            try:
+                params.group_id = "shared"
+            except AttributeError:
+                pass  # Older HailoRT without group_id support
             self._hailo_vdevice = VDevice(params)
 
             # Create and configure the inference model
