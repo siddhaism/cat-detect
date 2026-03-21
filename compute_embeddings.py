@@ -88,6 +88,25 @@ def main():
         f"(shape: {avg_embedding.shape}, from {len(embeddings)} photos)"
     )
 
+    # Also compute and save a color histogram reference
+    color_hists = []
+    for photo_path in sorted(photos):
+        img = cv2.imread(str(photo_path))
+        if img is None:
+            continue
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        hist = BrownieIdentifier.compute_color_histogram(img_rgb)
+        color_hists.append(hist)
+
+    if color_hists:
+        avg_color = np.mean(color_hists, axis=0).astype(np.float32)
+        norm = np.linalg.norm(avg_color)
+        if norm > 0:
+            avg_color = avg_color / norm
+        color_output = args.output.replace(".npy", "_color.npy")
+        np.save(color_output, avg_color)
+        print(f"Saved color reference to {color_output} (shape: {avg_color.shape})")
+
 
 if __name__ == "__main__":
     main()

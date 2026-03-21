@@ -68,6 +68,7 @@ BROWNIE_EMBEDDING = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
 )
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.60"))
+BROWNIE_MIN_CONFIDENCE = float(os.environ.get("BROWNIE_MIN_CONFIDENCE", "0.30"))
 DISABLE_BROWNIE = _env_bool("DISABLE_BROWNIE")
 
 BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "hailo")  # hailo -> dnn -> simple
@@ -213,6 +214,9 @@ def app_callback(pad, info, user_data):
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             track_id = track[0].get_id() if track else None
             if track_id is None:
+                continue
+            # Skip low-confidence detections — crops are too noisy for ID
+            if detection.get_confidence() < BROWNIE_MIN_CONFIDENCE:
                 continue
             if brownie_id.should_check(track_id):
                 try:

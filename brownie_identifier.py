@@ -58,6 +58,10 @@ class BrownieIdentifier:
         self._hailo_output_shape = None
         self._hailo_output_dim = 0
 
+        # Color histogram reference (supplementary to DNN/Hailo embedding)
+        self._color_reference = None
+        self._color_threshold = 0.75  # Minimum color similarity to consider
+
         # Async inference queue
         self._infer_queue = None
         self._infer_thread = None
@@ -72,6 +76,15 @@ class BrownieIdentifier:
         else:
             self.reference_embedding = None
             print("Warning: No reference embedding loaded. Brownie ID will not work.")
+
+        # Load color reference histogram (if available)
+        color_path = embedding_path.replace(".npy", "_color.npy") if embedding_path else None
+        if color_path and os.path.exists(color_path):
+            self._color_reference = np.load(color_path).astype(np.float32)
+            print(f"Loaded Brownie color reference: shape={self._color_reference.shape}")
+        else:
+            print("No color reference found. Run: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend <backend>")
+            print("  Color histogram will provide supplementary discrimination.")
 
         # Initialize backend (with fallback chain: hailo -> dnn -> simple)
         if backend == "hailo":
@@ -370,6 +383,30 @@ class BrownieIdentifier:
             features = features / norm
         return features.astype(np.float32)
 
+    # --- Color histogram (supplementary to any backend) ---
+
+    @staticmethod
+    def compute_color_histogram(crop_rgb):
+        """Compute a compact HSV color histogram for fur color comparison."""
+        img = cv2.resize(crop_rgb, (64, 64))
+        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        # H: 16 bins, S: 8 bins, V: 8 bins = 32 values total
+        h_hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten()
+        s_hist = cv2.calcHist([hsv], [1], None, [8], [0, 256]).flatten()
+        v_hist = cv2.calcHist([hsv], [2], None, [8], [0, 256]).flatten()
+        hist = np.concatenate([h_hist, s_hist, v_hist]).astype(np.float32)
+        norm = np.linalg.norm(hist)
+        if norm > 0:
+            hist /= norm
+        return hist
+
+    def _color_similarity(self, crop_rgb):
+        """Compare crop's color distribution to Brownie's reference colors."""
+        if self._color_reference is None:
+            return 1.0  # No color ref → don't filter
+        hist = self.compute_color_histogram(crop_rgb)
+        return float(np.dot(hist, self._color_reference))
+
     # --- Async inference (shared by all backends) ---
 
     def _start_infer_thread(self):
@@ -392,15 +429,21 @@ class BrownieIdentifier:
             try:
                 embedding = self.get_embedding(crop_rgb)
                 if self.reference_embedding is not None:
-                    similarity = float(np.dot(embedding, self.reference_embedding))
-                    is_brownie = similarity >= self.similarity_threshold
-                    self.cache_result(track_id, is_brownie, similarity)
-                    # Show running average for debugging
+                    emb_sim = float(np.dot(embedding, self.reference_embedding))
+                    color_sim = self._color_similarity(crop_rgb)
+                    # Combined score: weight embedding 60%, color 40%
+                    if self._color_reference is not None:
+                        combined = 0.6 * emb_sim + 0.4 * color_sim
+                    else:
+                        combined = emb_sim
+                    self.cache_result(track_id, combined >= self.similarity_threshold, combined)
+                    # Debug output
                     if track_id in self._cache:
                         _, scores, _ = self._cache[track_id]
                         avg = sum(scores) / len(scores)
                         cached_result = self._cache[track_id][0]
-                        print(f"Brownie check [{self.backend}]: track={track_id}, sim={similarity:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
+                        color_str = f", color={color_sim:.3f}" if self._color_reference is not None else ""
+                        print(f"Brownie check [{self.backend}]: track={track_id}, emb={emb_sim:.3f}{color_str}, combined={combined:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
             except Exception as e:
                 print(f"Brownie {self.backend} error: {e}", file=sys.stderr)
 
