@@ -19,7 +19,7 @@ Options:
   --stream                  Stream to MediaMTX via RTSP (view at http://<pi-ip>:8889/catcam)
   --arch VALUE              Force Hailo architecture (e.g., hailo8 or hailo8l)
   --brownie-embedding PATH  Path to brownie_embedding.npy
-  --brownie-threshold NUM   Similarity threshold 0.0-1.0 (default: 0.70)
+  --brownie-threshold NUM   Similarity threshold 0.0-1.0 (default: 0.40)
   --no-brownie              Disable Brownie identification
   --motion                  Enable motion detection (only process when motion detected)
   --motion-threshold NUM    Pixel change threshold 0-255 (default: 25)

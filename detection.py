@@ -59,7 +59,7 @@ BROWNIE_EMBEDDING = os.environ.get(
     "BROWNIE_EMBEDDING",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
 )
-BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
+BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.40"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
 if not DISABLE_BROWNIE:

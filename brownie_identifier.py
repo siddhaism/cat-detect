@@ -28,7 +28,7 @@ class BrownieIdentifier:
         embedding_path,
         model_path=None,
         backend="dnn",
-        similarity_threshold=0.70,
+        similarity_threshold=0.40,
         cache_ttl=10.0,
         standalone=False,
     ):
@@ -44,6 +44,7 @@ class BrownieIdentifier:
 
         # DNN model
         self._ort_session = None
+        self._penultimate_output = None
 
         # Async inference queue (for DNN backend in pipeline mode)
         self._infer_queue = None
@@ -59,8 +60,8 @@ class BrownieIdentifier:
 
             # Validate dimensions match the backend
             if backend == "dnn":
-                if self.reference_embedding.shape[0] != 1000:
-                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} != dnn backend dim=1000.")
+                if self.reference_embedding.shape[0] not in (1000, 1280):
+                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} not valid for dnn backend (expected 1000 or 1280).")
                     print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend dnn")
                     self.reference_embedding = None
             elif backend == "simple":
@@ -75,6 +76,14 @@ class BrownieIdentifier:
         # Initialize backend
         if backend == "dnn":
             self._init_dnn()
+            # Check if embedding dim matches extraction dim
+            if self._ort_session is not None and self.reference_embedding is not None:
+                expected_dim = 1280 if self._penultimate_output else 1000
+                if self.reference_embedding.shape[0] != expected_dim:
+                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} "
+                          f"but model extracts {expected_dim}-dim features.")
+                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend dnn")
+                    self.reference_embedding = None
             # Start background inference thread for pipeline use
             if self._ort_session is not None and self.reference_embedding is not None:
                 self._start_infer_thread()
@@ -82,7 +91,13 @@ class BrownieIdentifier:
             print("Brownie identifier using simple (OpenCV histogram) backend.")
 
     def _init_dnn(self):
-        """Load MobileNetV2 ONNX model via ONNX Runtime."""
+        """Load MobileNetV2 ONNX model via ONNX Runtime.
+
+        Attempts to extract penultimate layer features (1280-dim) which are
+        much better for visual similarity than classification logits (1000-dim).
+        Falls back to logits if the onnx package is not available to inspect
+        the model graph.
+        """
         script_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
             self.model_path,
@@ -104,12 +119,33 @@ class BrownieIdentifier:
 
         try:
             import onnxruntime as ort
+
+            # Try to find penultimate layer output name for 1280-dim features
+            self._penultimate_output = None
+            try:
+                import onnx
+                model = onnx.load(onnx_path)
+                # Find the last Gemm node (final classifier) and use its input
+                for node in reversed(model.graph.node):
+                    if node.op_type == "Gemm":
+                        self._penultimate_output = node.input[0]
+                        break
+                if self._penultimate_output:
+                    print(f"  Found penultimate layer: {self._penultimate_output} (1280-dim features)")
+            except ImportError:
+                print("  Note: 'onnx' package not installed; using 1000-dim logits.")
+                print("  For better accuracy, install: pip install onnx")
+            except Exception as e:
+                print(f"  Could not inspect model graph: {e}; using 1000-dim logits.")
+
             self._ort_session = ort.InferenceSession(
                 onnx_path,
                 providers=["CPUExecutionProvider"],
             )
             self._ort_input_name = self._ort_session.get_inputs()[0].name
-            print(f"Brownie identifier using DNN backend (onnxruntime): {os.path.basename(onnx_path)}")
+
+            feat_dim = 1280 if self._penultimate_output else 1000
+            print(f"Brownie identifier using DNN backend (onnxruntime, {feat_dim}-dim): {os.path.basename(onnx_path)}")
         except ImportError:
             print("ERROR: onnxruntime not installed. Run: pip install onnxruntime")
             print("  Falling back to simple backend.")
@@ -180,12 +216,24 @@ class BrownieIdentifier:
         return self._extract_simple_features(crop_rgb)
 
     def _extract_dnn_features(self, crop_rgb):
-        """Extract features using MobileNetV2 ONNX on CPU via ONNX Runtime."""
+        """Extract features using MobileNetV2 ONNX on CPU via ONNX Runtime.
+
+        Uses penultimate layer (1280-dim) if available, otherwise logits (1000-dim).
+        """
         img = cv2.resize(crop_rgb, (224, 224)).astype(np.float32) / 255.0
         img = (img - _MEAN) / _STD
         img_chw = np.transpose(img, (2, 0, 1))
         input_tensor = np.expand_dims(img_chw, 0)
-        output = self._ort_session.run(None, {self._ort_input_name: input_tensor})
+
+        if self._penultimate_output:
+            # Extract 1280-dim penultimate features (much better for similarity)
+            output = self._ort_session.run(
+                [self._penultimate_output],
+                {self._ort_input_name: input_tensor},
+            )
+        else:
+            output = self._ort_session.run(None, {self._ort_input_name: input_tensor})
+
         embedding = output[0].flatten().astype(np.float32)
         norm = np.linalg.norm(embedding)
         if norm > 0:
