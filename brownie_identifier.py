@@ -37,7 +37,7 @@ class BrownieIdentifier:
         embedding_path,
         model_path=None,
         backend="hailo",
-        similarity_threshold=0.60,
+        similarity_threshold=0.55,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
@@ -431,9 +431,10 @@ class BrownieIdentifier:
                 if self.reference_embedding is not None:
                     emb_sim = float(np.dot(embedding, self.reference_embedding))
                     color_sim = self._color_similarity(crop_rgb)
-                    # Combined score: weight embedding 60%, color 40%
+                    # Color is the primary signal for cat identity (fur pattern);
+                    # ArcFace (human face model) is unreliable for cats.
                     if self._color_reference is not None:
-                        combined = 0.6 * emb_sim + 0.4 * color_sim
+                        combined = 0.25 * emb_sim + 0.75 * color_sim
                     else:
                         combined = emb_sim
                     self.cache_result(track_id, combined >= self.similarity_threshold, combined)
