@@ -75,10 +75,15 @@ class GStreamerDetectionApp(GStreamerApp):
             "TAPPAS_POST_PROC_DIR",
             "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes",
         )
-        self.detection_crop_so = os.path.join(tappas_post_proc, "cropping", "libcroppers.so")
-        if not os.path.exists(self.detection_crop_so):
-            # Try flat directory
-            self.detection_crop_so = os.path.join(tappas_post_proc, "libcroppers.so")
+        self.detection_crop_so = None
+        for candidate in [
+            os.path.join(tappas_post_proc, "cropping_algorithms", "libdetection_croppers.so"),
+            os.path.join(tappas_post_proc, "cropping", "libcroppers.so"),
+            os.path.join(tappas_post_proc, "libcroppers.so"),
+        ]:
+            if os.path.exists(candidate):
+                self.detection_crop_so = candidate
+                break
 
         # User-defined label JSON file
         self.labels_json = self.options_menu.labels_json
@@ -120,7 +125,7 @@ class GStreamerDetectionApp(GStreamerApp):
 
         # Stage 2: Embedding (ResNet) — cascade on detected regions
         if self.embedding_hef and os.path.exists(self.embedding_hef):
-            if os.path.exists(self.detection_crop_so):
+            if self.detection_crop_so:
                 print(f"Cascade pipeline: embedding model={self.embedding_hef}")
                 print(f"  Detection cropper SO: {self.detection_crop_so}")
                 pipeline += (
@@ -137,7 +142,7 @@ class GStreamerDetectionApp(GStreamerApp):
                     + "agg2. ! "
                 )
             else:
-                print(f"WARNING: Detection cropper SO not found at {self.detection_crop_so}")
+                print(f"WARNING: Detection cropper SO not found")
                 print("  Embedding cascade disabled. Install TAPPAS cropper libraries.")
         elif self.embedding_hef:
             print(f"WARNING: Embedding HEF not found at {self.embedding_hef}")
