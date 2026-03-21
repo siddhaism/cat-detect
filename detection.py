@@ -23,10 +23,6 @@ emitted_ids = set()
 MAX_TRACKED_IDS = 10000
 
 # Define the target classes for detection
-# this should align to the COCO list of objects
-# https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
-# note that this just filters which ones we'll call MQTT on, they'll still appear as bounding boxes because we haven't
-# told hailo to exclude them.
 target_classes = {'cat'}
 
 
@@ -53,14 +49,12 @@ if not DISABLE_AWS and boto3 is not None:
         except Exception:
             client = None
 else:
-    # Explicitly disabled or boto3 missing
     client = None
 
 # -----------------------------------------------------------------------------------------------
-# Brownie identification setup
+# Brownie identification setup (simple backend — CPU histogram features)
 # -----------------------------------------------------------------------------------------------
 brownie_id = None
-brownie_ref_embedding = None  # For pipeline cascade mode (ResNet in GStreamer)
 BROWNIE_EMBEDDING = os.environ.get(
     "BROWNIE_EMBEDDING",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
@@ -69,36 +63,11 @@ BROWNIE_MODEL = os.environ.get(
     "BROWNIE_MODEL",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "resnet_v1_50_h8l.hef"),
 )
-BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "simple") or "simple"
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
-# Pipeline cascade mode: ResNet runs inside the GStreamer pipeline, we just read embeddings
-# from buffer metadata in the callback. No separate VDevice needed.
-USE_PIPELINE_CASCADE = BROWNIE_BACKEND == "hailo" and not DISABLE_BROWNIE
-
-if USE_PIPELINE_CASCADE:
-    # Load reference embedding for direct comparison in callback
+if not DISABLE_BROWNIE:
     if os.path.exists(BROWNIE_EMBEDDING):
-        brownie_ref_embedding = np.load(BROWNIE_EMBEDDING).astype(np.float32)
-        norm = np.linalg.norm(brownie_ref_embedding)
-        if norm > 0:
-            brownie_ref_embedding = brownie_ref_embedding / norm
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"  BROWNIE ID (PIPELINE CASCADE): dim={brownie_ref_embedding.shape[0]}, "
-              f"threshold={BROWNIE_THRESHOLD}", file=sys.stderr)
-        print(f"{'='*60}\n", file=sys.stderr)
-    else:
-        print(f"Brownie embedding not found at {BROWNIE_EMBEDDING} — cascade disabled.")
-        USE_PIPELINE_CASCADE = False
-
-elif not DISABLE_BROWNIE:
-    # Simple backend: use BrownieIdentifier with histogram features
-    _missing = []
-    if not os.path.exists(BROWNIE_EMBEDDING):
-        _missing.append(f"embedding not found at {BROWNIE_EMBEDDING}")
-
-    if not _missing:
         try:
             from brownie_identifier import BrownieIdentifier
             brownie_id = BrownieIdentifier(
@@ -120,8 +89,7 @@ elif not DISABLE_BROWNIE:
             print(f"BROWNIE ID FAILED: {e}", file=sys.stderr)
             brownie_id = None
     else:
-        for m in _missing:
-            print(f"Brownie {m} — Brownie ID disabled.")
+        print(f"Brownie embedding not found at {BROWNIE_EMBEDDING} — Brownie ID disabled.")
 
 # -----------------------------------------------------------------------------------------------
 # Motion detection configuration
@@ -140,43 +108,31 @@ if ENABLE_MOTION:
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
-# Inheritance from the app_callback_class
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
-        # Enable frame access for motion detection and simple-backend brownie ID
         if brownie_id is not None or ENABLE_MOTION:
             self.use_frame = True
 
 # -----------------------------------------------------------------------------------------------
-# User-defined callback function
+# Helpers
 # -----------------------------------------------------------------------------------------------
 
 def _relabel_detection(roi, detection, new_label):
-    """Replace a detection's label by removing and re-adding with the new label.
-    Needed because HailoDetection only exposes get_label(), not set_label()."""
+    """Replace a detection's label by removing and re-adding with the new label."""
     bbox = detection.get_bbox()
     confidence = detection.get_confidence()
-    # Preserve sub-objects (tracking IDs, classifications, etc.)
     sub_objects = detection.get_objects()
-
-    # Remove original detection
     roi.remove_object(detection)
-
-    # Create new detection with updated label
-    new_det = hailo.HailoDetection(
-        bbox, new_label, confidence
-    )
-    # Re-attach sub-objects
+    new_det = hailo.HailoDetection(bbox, new_label, confidence)
     for obj in sub_objects:
         new_det.add_object(obj)
-
     roi.add_object(new_det)
     return new_det
 
 
 def _detect_motion(frame):
-    """Detect motion using frame differencing. Returns True if motion detected."""
+    """Detect motion using frame differencing."""
     global _motion_prev_gray, _motion_cooldown
 
     small = cv2.resize(frame, (320, 180))
@@ -185,7 +141,7 @@ def _detect_motion(frame):
 
     if _motion_prev_gray is None:
         _motion_prev_gray = gray
-        return True  # First frame, assume motion
+        return True
 
     diff = cv2.absdiff(_motion_prev_gray, gray)
     thresh = cv2.threshold(diff, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
@@ -203,30 +159,10 @@ def _detect_motion(frame):
     return False
 
 
-def _draw_detection(frame, detection, width, height):
-    """Draw a bounding box and label on the frame using OpenCV."""
-    bbox = detection.get_bbox()
-    x1 = max(0, int(bbox.xmin() * width))
-    y1 = max(0, int(bbox.ymin() * height))
-    x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
-    y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+# -----------------------------------------------------------------------------------------------
+# Main callback
+# -----------------------------------------------------------------------------------------------
 
-    label = detection.get_label()
-    confidence = detection.get_confidence()
-    text = f"{label} {confidence:.2f}"
-
-    # Green box for Brownie, blue for other cats
-    color = (0, 255, 0) if label == "Brownie" else (0, 128, 255)
-
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-    # Draw label background
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-    cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw, y1), color, -1)
-    cv2.putText(frame, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-
-# First callback: runs BEFORE the cascade cropper.
-# Filters non-cat detections, does motion detection, and simple-backend brownie ID.
 def app_callback(pad, info, user_data):
     buffer = info.get_buffer()
     if buffer is None:
@@ -235,7 +171,7 @@ def app_callback(pad, info, user_data):
     user_data.increment()
     format, width, height = get_caps_from_pad(pad)
 
-    # Map buffer for read access (needed for motion detection and simple brownie ID)
+    # Map buffer for read access
     frame = None
     if format and width and height:
         channels = 3
@@ -251,7 +187,7 @@ def app_callback(pad, info, user_data):
         elif success:
             buffer.unmap(map_info)
 
-    # Motion detection - skip processing and clear overlay if no motion
+    # Motion detection
     if ENABLE_MOTION and frame is not None:
         if not _detect_motion(frame):
             roi = hailo.get_roi_from_buffer(buffer)
@@ -262,12 +198,12 @@ def app_callback(pad, info, user_data):
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    # Filter to target classes only (cats) — this ensures only cats go through the cascade cropper
+    # Remove non-cat detections
     for detection in hailo_detections:
         if detection.get_label() not in target_classes:
             roi.remove_object(detection)
 
-    # Simple-backend brownie ID (runs here since it doesn't need cascade)
+    # Brownie identification on remaining cat detections
     if brownie_id is not None and frame is not None:
         for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
@@ -293,70 +229,9 @@ def app_callback(pad, info, user_data):
             elif brownie_id.get_cached_result(track_id):
                 _relabel_detection(roi, detection, "Brownie")
 
-    # MQTT / tracking for non-cascade mode (simple backend or no brownie)
-    if not USE_PIPELINE_CASCADE:
-        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
-            label = detection.get_label()
-            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-            if len(track) == 0:
-                continue
-            tracking_id = track[0].get_id()
-            if tracking_id not in emitted_ids:
-                print(f"Detection!: {tracking_id} {label} {detection.get_confidence():.2f}\n")
-                emitted_ids.add(tracking_id)
-                if len(emitted_ids) > MAX_TRACKED_IDS:
-                    emitted_ids.clear()
-                if client is not None:
-                    payload = {"tracking_id": tracking_id, "label": label}
-                    try:
-                        response = client.publish(topic=topic, qos=1, payload=json.dumps(payload))
-                        print(f"Message published: {response}")
-                    except Exception as e:
-                        print(f"AWS publish failed (ignored): {e}")
-
-    return Gst.PadProbeReturn.OK
-
-
-# Second callback: runs AFTER the cascade cropper + ResNet.
-# Reads ResNet embeddings from detections and does Brownie identification.
-# Connected via identity element's "handoff" signal: (element, buffer, user_data)
-def app_callback_brownie(element, buffer, user_data):
-    if buffer is None:
-        return
-
-    roi = hailo.get_roi_from_buffer(buffer)
-
+    # Tracking and MQTT
     for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
         label = detection.get_label()
-        track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-        track_id = track[0].get_id() if track else None
-
-        # Read ResNet embedding tensors attached by the cascade hailonet
-        if brownie_ref_embedding is not None and track_id is not None:
-            # Find tensor sub-objects by checking type name (HAILO_TENSOR not in all hailo versions)
-            tensors = [obj for obj in detection.get_objects()
-                       if type(obj).__name__ == "HailoTensor"]
-            if tensors:
-                try:
-                    raw = np.array(tensors[0].data(), dtype=np.float32).flatten()
-                    norm = np.linalg.norm(raw)
-                    if norm > 0:
-                        raw = raw / norm
-                    similarity = float(np.dot(raw, brownie_ref_embedding))
-                    is_brownie = similarity >= BROWNIE_THRESHOLD
-                    print(f"Brownie check (cascade): track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
-                    if is_brownie:
-                        detection = _relabel_detection(roi, detection, "Brownie")
-                        label = "Brownie"
-                except Exception as e:
-                    print(f"Brownie cascade error: {e}", file=sys.stderr)
-            else:
-                # Debug: log sub-object types to find the right tensor type
-                sub_types = [type(o).__name__ for o in detection.get_objects()]
-                if sub_types:
-                    print(f"Brownie cascade: track={track_id}, sub-objects: {sub_types}", file=sys.stderr)
-
-        # Tracking and MQTT
         track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
         if len(track) == 0:
             continue
@@ -374,17 +249,16 @@ def app_callback_brownie(element, buffer, user_data):
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
 
+    return Gst.PadProbeReturn.OK
+
 
 if __name__ == "__main__":
-    # Point to the hailo-rpi5-examples .env file
     env_file = Path(os.path.expanduser("~/repos/hailo-rpi5-examples/.env"))
     if env_file.exists():
         os.environ["HAILO_ENV_FILE"] = str(env_file)
 
-    # Create an instance of the user app callback class
     user_data = user_app_callback_class()
     if client is None:
         print("AWS disabled or not configured; running locally without IoT publish.")
-    brownie_cb = app_callback_brownie if USE_PIPELINE_CASCADE else None
-    app = GStreamerDetectionApp(app_callback, user_data, brownie_callback=brownie_cb)
+    app = GStreamerDetectionApp(app_callback, user_data)
     app.run()

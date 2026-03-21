@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 print_usage() {
   cat <<EOF
 Usage: bash run_local.sh --hef /path/to/model.hef [--no-viewer] [--stream] [--arch hailo8|hailo8l]
-                         [--brownie-model PATH] [--brownie-embedding PATH]
+                         [--brownie-embedding PATH]
                          [--brownie-threshold 0.70] [--no-brownie]
                          [--motion] [--motion-threshold NUM] [--motion-cooldown SECS]
 
@@ -18,10 +18,8 @@ Options:
   --no-viewer               Do not launch the viewer sink
   --stream                  Stream to MediaMTX via RTSP (view at http://<pi-ip>:8889/catcam)
   --arch VALUE              Force Hailo architecture (e.g., hailo8 or hailo8l)
-  --brownie-model PATH      Path to embedding model HEF (default: resnet_v1_50_h8l.hef)
   --brownie-embedding PATH  Path to brownie_embedding.npy
   --brownie-threshold NUM   Similarity threshold 0.0-1.0 (default: 0.70)
-  --brownie-backend VALUE   "simple" or "hailo" (default: simple)
   --no-brownie              Disable Brownie identification
   --motion                  Enable motion detection (only process when motion detected)
   --motion-threshold NUM    Pixel change threshold 0-255 (default: 25)
@@ -33,10 +31,8 @@ HEF_PATH=""
 LAUNCH_VIEWER=1
 ENABLE_STREAM=0
 ARCH_ARG=()
-BROWNIE_MODEL="${BROWNIE_MODEL:-}"
 BROWNIE_EMBEDDING="${BROWNIE_EMBEDDING:-}"
 BROWNIE_THRESHOLD="${BROWNIE_THRESHOLD:-}"
-BROWNIE_BACKEND="${BROWNIE_BACKEND:-}"
 DISABLE_BROWNIE="${DISABLE_BROWNIE:-0}"
 ENABLE_MOTION="${ENABLE_MOTION:-0}"
 MOTION_THRESHOLD="${MOTION_THRESHOLD:-}"
@@ -52,14 +48,10 @@ while [[ $# -gt 0 ]]; do
       ENABLE_STREAM=1; shift;;
     --arch)
       ARCH_ARG=("--arch" "$2"); shift 2;;
-    --brownie-model)
-      BROWNIE_MODEL="$2"; shift 2;;
     --brownie-embedding)
       BROWNIE_EMBEDDING="$2"; shift 2;;
     --brownie-threshold)
       BROWNIE_THRESHOLD="$2"; shift 2;;
-    --brownie-backend)
-      BROWNIE_BACKEND="$2"; shift 2;;
     --no-brownie)
       DISABLE_BROWNIE=1; shift;;
     --motion)
@@ -168,18 +160,12 @@ fi
 echo "Starting detection pipeline (local, AWS disabled)..."
 export DISABLE_AWS=1
 export DISABLE_BROWNIE="$DISABLE_BROWNIE"
-[[ -n "$BROWNIE_MODEL" ]]     && export BROWNIE_MODEL="$BROWNIE_MODEL"
 [[ -n "$BROWNIE_EMBEDDING" ]] && export BROWNIE_EMBEDDING="$BROWNIE_EMBEDDING"
 [[ -n "$BROWNIE_THRESHOLD" ]] && export BROWNIE_THRESHOLD="$BROWNIE_THRESHOLD"
-[[ -n "$BROWNIE_BACKEND" ]]   && export BROWNIE_BACKEND="$BROWNIE_BACKEND"
 [[ "$ENABLE_MOTION" -eq 1 ]] && export ENABLE_MOTION=1
 [[ -n "$MOTION_THRESHOLD" ]]  && export MOTION_THRESHOLD="$MOTION_THRESHOLD"
 [[ -n "$MOTION_COOLDOWN" ]]   && export MOTION_COOLDOWN="$MOTION_COOLDOWN"
-EMBEDDING_HEF_ARG=()
-if [[ -n "$BROWNIE_MODEL" && "$BROWNIE_BACKEND" == "hailo" ]]; then
-  EMBEDDING_HEF_ARG=("--embedding-hef" "$BROWNIE_MODEL")
-fi
-python3 -u "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" "${EMBEDDING_HEF_ARG[@]}" &
+python3 -u "$ROOT_DIR/detection.py" --hef-path "$HEF_PATH" "${ARCH_ARG[@]}" &
 P_DETECT=$!
 
 # --- Wait for inference shared memory to be ready ---
