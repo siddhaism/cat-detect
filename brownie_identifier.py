@@ -37,7 +37,7 @@ class BrownieIdentifier:
         embedding_path,
         model_path=None,
         backend="hailo",
-        similarity_threshold=0.57,
+        similarity_threshold=0.60,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
@@ -464,7 +464,7 @@ class BrownieIdentifier:
             return False  # Confidently identified
         if len(scores) >= 5:
             return False  # Max checks reached
-        return (time.time() - ts) > 2.0
+        return (time.time() - ts) > 1.0
 
     def cache_result(self, tracking_id, is_brownie, similarity=0.0):
         """Cache identification result. Decision based on average of all scores."""
@@ -477,9 +477,9 @@ class BrownieIdentifier:
             scores = prev_scores + [similarity]
         else:
             scores = [similarity]
-        # Require average score above threshold (not just one high score)
+        # Require average score above threshold AND at least 2 checks
         avg_sim = sum(scores) / len(scores)
-        is_brownie = avg_sim >= self.similarity_threshold
+        is_brownie = avg_sim >= self.similarity_threshold and len(scores) >= 2
         self._cache[tracking_id] = (is_brownie, scores, time.time())
 
     def get_cached_result(self, tracking_id):
