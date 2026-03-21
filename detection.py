@@ -333,7 +333,9 @@ def app_callback_brownie(element, buffer, user_data):
 
         # Read ResNet embedding tensors attached by the cascade hailonet
         if brownie_ref_embedding is not None and track_id is not None:
-            tensors = detection.get_objects_typed(hailo.HAILO_TENSOR)
+            # Find tensor sub-objects by checking type name (HAILO_TENSOR not in all hailo versions)
+            tensors = [obj for obj in detection.get_objects()
+                       if type(obj).__name__ == "HailoTensor"]
             if tensors:
                 try:
                     raw = np.array(tensors[0].data(), dtype=np.float32).flatten()
@@ -348,6 +350,11 @@ def app_callback_brownie(element, buffer, user_data):
                         label = "Brownie"
                 except Exception as e:
                     print(f"Brownie cascade error: {e}", file=sys.stderr)
+            else:
+                # Debug: log sub-object types to find the right tensor type
+                sub_types = [type(o).__name__ for o in detection.get_objects()]
+                if sub_types:
+                    print(f"Brownie cascade: track={track_id}, sub-objects: {sub_types}", file=sys.stderr)
 
         # Tracking and MQTT
         track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
