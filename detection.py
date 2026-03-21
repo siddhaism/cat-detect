@@ -307,8 +307,16 @@ def app_callback(pad, info, user_data):
 
     # Draw bounding boxes directly on the frame via OpenCV
     if frame is not None:
-        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
-            _draw_detection(frame, detection, width, height)
+        detections_to_draw = roi.get_objects_typed(hailo.HAILO_DETECTION)
+        if detections_to_draw:
+            for detection in detections_to_draw:
+                _draw_detection(frame, detection, width, height)
+            # Write the modified frame back into the GStreamer buffer
+            success, map_info = buffer.map(Gst.MapFlags.WRITE)
+            if success:
+                frame_bytes = frame.tobytes()
+                map_info.data[:len(frame_bytes)] = frame_bytes
+                buffer.unmap(map_info)
 
     return Gst.PadProbeReturn.OK
 
