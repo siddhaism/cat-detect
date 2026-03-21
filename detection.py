@@ -132,9 +132,8 @@ if ENABLE_MOTION:
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
-        # Enable frame extraction when Brownie identification is active
-        if brownie_id is not None or ENABLE_MOTION:
-            self.use_frame = True
+        # Always enable frame access so we can draw bounding boxes via OpenCV
+        self.use_frame = True
 
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
@@ -189,6 +188,28 @@ def _detect_motion(frame):
         return True
 
     return False
+
+
+def _draw_detection(frame, detection, width, height):
+    """Draw a bounding box and label on the frame using OpenCV."""
+    bbox = detection.get_bbox()
+    x1 = max(0, int(bbox.xmin() * width))
+    y1 = max(0, int(bbox.ymin() * height))
+    x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+    y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+
+    label = detection.get_label()
+    confidence = detection.get_confidence()
+    text = f"{label} {confidence:.2f}"
+
+    # Green box for Brownie, blue for other cats
+    color = (0, 255, 0) if label == "Brownie" else (0, 128, 255)
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+    # Draw label background
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+    cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw, y1), color, -1)
+    cv2.putText(frame, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
 
 # This is the callback function that will be called when data is available from the pipeline
@@ -283,6 +304,11 @@ def app_callback(pad, info, user_data):
                     print(f"Message published: {response}")
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
+
+    # Draw bounding boxes directly on the frame via OpenCV
+    if frame is not None:
+        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
+            _draw_detection(frame, detection, width, height)
 
     return Gst.PadProbeReturn.OK
 
