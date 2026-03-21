@@ -55,6 +55,7 @@ class BrownieIdentifier:
         self._hailo_configured = None
         self._hailo_vdevice = None
         self._hailo_input_shape = None
+        self._hailo_output_shape = None
         self._hailo_output_dim = 0
 
         # Async inference queue
@@ -179,14 +180,14 @@ class BrownieIdentifier:
 
             # Discover input/output shapes from the model
             self._hailo_input_shape = infer_model.input().shape
-            output_shape = infer_model.output().shape
+            self._hailo_output_shape = infer_model.output().shape
             # Output dim: flatten the shape (e.g., (512,) -> 512, (1, 1000) -> 1000)
             self._hailo_output_dim = 1
-            for d in output_shape:
+            for d in self._hailo_output_shape:
                 self._hailo_output_dim *= d
 
             print(f"Brownie identifier using HAILO backend ({self._hailo_output_dim}-dim): {os.path.basename(hef_path)}")
-            print(f"  Input: {self._hailo_input_shape}, Output: {output_shape}")
+            print(f"  Input: {self._hailo_input_shape}, Output: {self._hailo_output_shape}")
 
         except ImportError:
             print("hailo_platform not installed — Hailo backend unavailable.")
@@ -216,10 +217,14 @@ class BrownieIdentifier:
 
         bindings = self._hailo_configured.create_bindings()
         bindings.input().set_buffer(input_data)
+
+        # Pre-allocate output buffer (required in HailoRT 4.20+)
+        output_buffer = np.empty([1] + list(self._hailo_output_shape), dtype=np.float32)
+        bindings.output().set_buffer(output_buffer)
+
         self._hailo_configured.run([bindings], 10000)
 
-        output = bindings.output().get_buffer()
-        embedding = output.flatten().astype(np.float32)
+        embedding = output_buffer.flatten().astype(np.float32)
         norm = np.linalg.norm(embedding)
         if norm > 0:
             embedding = embedding / norm
