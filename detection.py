@@ -68,7 +68,7 @@ BROWNIE_MODEL = os.environ.get(
     "BROWNIE_MODEL",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "resnet_v1_50_h8l.hef"),
 )
-BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "simple")
+BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "simple") or "simple"
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
