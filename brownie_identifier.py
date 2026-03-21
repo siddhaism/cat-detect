@@ -366,24 +366,35 @@ class BrownieIdentifier:
         return similarity >= self.similarity_threshold, similarity
 
     # --- Tracking cache ---
+    # Stores: tracking_id -> (is_brownie, best_similarity, check_count, timestamp)
 
     def should_check(self, tracking_id):
-        """Rate-limit: only check once per tracking ID, or re-check after TTL.
-        Never re-check tracks already identified as Brownie (score fluctuates with angle)."""
+        """Check multiple frames per track to find the best score.
+        Stop checking once identified as Brownie or after max checks."""
         if tracking_id not in self._cache:
             return True
-        is_brownie, ts = self._cache[tracking_id]
+        is_brownie, best_sim, count, ts = self._cache[tracking_id]
         if is_brownie:
-            return False  # Keep positive identification permanently
-        return (time.time() - ts) > self.cache_ttl
+            return False  # Already identified
+        if count >= 5:
+            return False  # Checked enough times
+        # Re-check every 2 seconds for better angles
+        return (time.time() - ts) > 2.0
 
-    def cache_result(self, tracking_id, is_brownie):
-        """Cache identification result for a tracking ID."""
+    def cache_result(self, tracking_id, is_brownie, similarity=0.0):
+        """Cache identification result, keeping the best similarity score."""
         if len(self._cache) > self._max_cache:
-            oldest = sorted(self._cache, key=lambda k: self._cache[k][1])[:100]
+            oldest = sorted(self._cache, key=lambda k: self._cache[k][3])[:100]
             for k in oldest:
                 del self._cache[k]
-        self._cache[tracking_id] = (is_brownie, time.time())
+        if tracking_id in self._cache:
+            prev_brownie, prev_sim, prev_count, _ = self._cache[tracking_id]
+            best_sim = max(prev_sim, similarity)
+            # Promote to Brownie if best score crosses threshold
+            is_brownie = is_brownie or prev_brownie or (best_sim >= self.similarity_threshold)
+            self._cache[tracking_id] = (is_brownie, best_sim, prev_count + 1, time.time())
+        else:
+            self._cache[tracking_id] = (is_brownie, similarity, 1, time.time())
 
     def get_cached_result(self, tracking_id):
         """Get cached result for a tracking ID."""

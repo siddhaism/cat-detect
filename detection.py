@@ -63,7 +63,7 @@ BROWNIE_MODEL = os.environ.get(
     "BROWNIE_MODEL",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "resnet_v1_50_h8l.hef"),
 )
-BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
+BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.60"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
 if not DISABLE_BROWNIE:
@@ -220,7 +220,7 @@ def app_callback(pad, info, user_data):
                     if x2 > x1 and y2 > y1:
                         crop = frame[y1:y2, x1:x2].copy()
                         is_brownie, similarity = brownie_id.is_brownie(crop)
-                        brownie_id.cache_result(track_id, is_brownie)
+                        brownie_id.cache_result(track_id, is_brownie, similarity)
                         print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
                         if is_brownie:
                             _relabel_detection(roi, detection, "Brownie")
