@@ -3,14 +3,15 @@
 Compute Brownie's reference embedding from photos.
 
 Usage:
-  python3 compute_embeddings.py --photos-dir ~/brownie_photos/
-  python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend hailo --model resnet_v1_50_h8l.hef
-  python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend cpu --model mobilenet_v2.onnx
+  python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend dnn
+  python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend simple
 
 The script processes all images in --photos-dir, extracts features,
 averages them, and saves to brownie_embedding.npy.
 
 Recommend 5-10+ photos of Brownie with various angles and lighting.
+For best results, use cropped photos (just the cat, no background):
+  python3 crop_photos.py --input-dir ~/brownie_photos/ --output-dir ~/brownie_photos_cropped/
 """
 
 import argparse
@@ -26,41 +27,28 @@ def main():
         "--photos-dir", required=True, help="Directory with Brownie photos"
     )
     parser.add_argument(
-        "--model", default=None, help="Path to embedding model (.hef or .onnx). Not needed for --backend simple."
+        "--model", default=None, help="Path to ONNX model (optional, auto-detected for dnn backend)"
     )
     parser.add_argument(
         "--output", default="brownie_embedding.npy", help="Output .npy file"
     )
     parser.add_argument(
         "--backend",
-        default="hailo",
-        choices=["hailo", "cpu", "simple"],
-        help="Feature extraction backend (default: hailo)",
-    )
-    parser.add_argument(
-        "--input-size",
-        type=int,
-        default=224,
-        help="Model input size (default: 224)",
+        default="dnn",
+        choices=["dnn", "simple"],
+        help="Feature extraction backend (default: dnn)",
     )
     args = parser.parse_args()
 
-    backend = args.backend
-    if backend != "simple" and args.model is None:
-        print("Error: --model is required for hailo and cpu backends")
-        return
-
     from brownie_identifier import BrownieIdentifier
 
-    # Create identifier in standalone mode (no worker process needed)
     identifier = BrownieIdentifier(
         embedding_path=None,
         model_path=args.model,
-        backend=backend,
+        backend=args.backend,
         standalone=True,
     )
 
-    # Process all photos
     photo_dir = Path(args.photos_dir)
     if not photo_dir.exists():
         print(f"Error: directory {photo_dir} does not exist")
@@ -89,7 +77,6 @@ def main():
         print("Error: no valid images processed")
         return
 
-    # Average and normalize
     avg_embedding = np.mean(embeddings, axis=0).astype(np.float32)
     norm = np.linalg.norm(avg_embedding)
     if norm > 0:

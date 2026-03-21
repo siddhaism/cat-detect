@@ -52,18 +52,14 @@ else:
     client = None
 
 # -----------------------------------------------------------------------------------------------
-# Brownie identification setup (simple backend — CPU histogram features)
+# Brownie identification setup (DNN backend — MobileNetV2 on CPU)
 # -----------------------------------------------------------------------------------------------
 brownie_id = None
 BROWNIE_EMBEDDING = os.environ.get(
     "BROWNIE_EMBEDDING",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
 )
-BROWNIE_MODEL = os.environ.get(
-    "BROWNIE_MODEL",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "resnet_v1_50_h8l.hef"),
-)
-BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.60"))
+BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.70"))
 DISABLE_BROWNIE = os.environ.get("DISABLE_BROWNIE", "0") in ("1", "true", "True")
 
 if not DISABLE_BROWNIE:
@@ -72,14 +68,13 @@ if not DISABLE_BROWNIE:
             from brownie_identifier import BrownieIdentifier
             brownie_id = BrownieIdentifier(
                 embedding_path=BROWNIE_EMBEDDING,
-                model_path=BROWNIE_MODEL,
-                backend="simple",
+                backend="dnn",
                 similarity_threshold=BROWNIE_THRESHOLD,
                 standalone=True,
             )
             if brownie_id.reference_embedding is not None:
                 print(f"\n{'='*60}", file=sys.stderr)
-                print(f"  BROWNIE ID ACTIVE: backend=simple, "
+                print(f"  BROWNIE ID ACTIVE: backend={brownie_id.backend}, "
                       f"dim={brownie_id.reference_embedding.shape[0]}, "
                       f"threshold={BROWNIE_THRESHOLD}", file=sys.stderr)
                 print(f"{'='*60}\n", file=sys.stderr)

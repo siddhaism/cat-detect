@@ -2,69 +2,30 @@ import numpy as np
 import cv2
 import os
 import time
-import multiprocessing as mp
 
 
-def _hailo_worker(model_path, input_queue, result_queue):
-    """Worker process that runs the Hailo embedding model."""
-    from hailo_platform import VDevice, HEF, InferVStreams, InputVStreamParams, OutputVStreamParams
-
-    hef = HEF(model_path)
-    params = VDevice.create_params()
-    vdevice = VDevice(params)
-    network_group = vdevice.configure(hef)[0]
-    activated = network_group.activate()
-    activated.__enter__()
-
-    input_info = hef.get_input_vstream_infos()[0]
-    input_name = input_info.name
-    input_shape = input_info.shape  # (H, W, C)
-
-    input_vstream_params = InputVStreamParams.make(network_group)
-    output_vstream_params = OutputVStreamParams.make(network_group)
-
-    print(f"[Hailo worker] Ready: input={input_name} {input_shape}")
-
-    try:
-        while True:
-            item = input_queue.get()
-            if item is None:
-                break
-            track_id, crop_rgb = item
-            try:
-                img = cv2.resize(crop_rgb, (input_shape[1], input_shape[0])).astype(np.uint8)
-                input_data = np.expand_dims(img, 0)
-
-                with InferVStreams(network_group, input_vstream_params, output_vstream_params) as infer:
-                    result = infer.infer({input_name: input_data})
-
-                output_key = list(result.keys())[0]
-                embedding = result[output_key].flatten().astype(np.float32)
-                norm = np.linalg.norm(embedding)
-                if norm > 0:
-                    embedding = embedding / norm
-                result_queue.put((track_id, embedding))
-            except Exception as e:
-                print(f"[Hailo worker] inference error: {e}")
-                result_queue.put((track_id, None))
-    finally:
-        try:
-            activated.__exit__(None, None, None)
-        except Exception:
-            pass
+# ImageNet normalization constants
+_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 class BrownieIdentifier:
     """
     Identifies whether a detected cat is "Brownie" using embedding comparison.
-    Runs the embedding model on Hailo in a separate process to avoid device conflicts.
+
+    Backend "dnn": Uses MobileNetV2 ONNX via OpenCV DNN (runs on CPU).
+                   Produces 1000-dim embeddings from ImageNet classification logits.
+                   Much more discriminative than color histograms.
+
+    Backend "simple": Uses spatial color + texture histograms (252-dim, CPU only).
+                      Fast but less discriminative for similar-looking cats.
     """
 
     def __init__(
         self,
         embedding_path,
-        model_path,
-        backend="hailo",
+        model_path=None,
+        backend="dnn",
         similarity_threshold=0.70,
         cache_ttl=10.0,
         standalone=False,
@@ -75,153 +36,79 @@ class BrownieIdentifier:
         self.model_path = model_path
         self.standalone = standalone
 
-        # Tracking cache: tracking_id -> (is_brownie, similarity, timestamp)
+        # Tracking cache: tracking_id -> (is_brownie, best_similarity, check_count, timestamp)
         self._cache = {}
         self._max_cache = 500
 
+        # DNN model (loaded lazily)
+        self._dnn_net = None
+
         # Load reference embedding
         if embedding_path and os.path.exists(embedding_path):
-            self.reference_embedding = np.load(embedding_path)
+            self.reference_embedding = np.load(embedding_path).astype(np.float32)
             norm = np.linalg.norm(self.reference_embedding)
             if norm > 0:
                 self.reference_embedding = self.reference_embedding / norm
             print(f"Loaded Brownie reference embedding: shape={self.reference_embedding.shape}")
 
-            # Validate dimensions match the backend (skip if hailo — may fall back later)
-            if backend == "simple":
-                # 3x3 grid * (12 H-bins + 8 S-bins) + 3x3 grid * 8 gradient bins = 9*20 + 9*8 = 252
-                expected_dim = 252
-                if self.reference_embedding.shape[0] != expected_dim:
-                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} != simple backend dim={expected_dim}.")
+            # Validate dimensions match the backend
+            if backend == "dnn":
+                if self.reference_embedding.shape[0] != 1000:
+                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} != dnn backend dim=1000.")
+                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend dnn")
+                    self.reference_embedding = None
+            elif backend == "simple":
+                if self.reference_embedding.shape[0] != 252:
+                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} != simple backend dim=252.")
                     print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend simple")
                     self.reference_embedding = None
-
-            # Store reference photos dir for possible re-computation on fallback
-            self._photos_dir = None
-            for candidate in [
-                os.path.expanduser("~/brownie_photos_cropped"),
-                os.path.expanduser("~/brownie_photos"),
-            ]:
-                if os.path.isdir(candidate):
-                    self._photos_dir = candidate
-                    break
         else:
             self.reference_embedding = None
             print("Warning: No reference embedding loaded. Brownie ID will not work.")
 
-        # Initialize backend
-        self._worker = None
-        self._input_queue = None
-        self._result_queue = None
-        self._hailo_direct = None
-        self._hailo_lazy = False
-
-        if backend == "hailo":
-            if standalone:
-                # Defer Hailo init to first use so hailonet can claim the device first
-                self._hailo_lazy = True
-                print("Hailo embedding model will initialize on first use (deferred).")
-            else:
-                self._start_hailo_worker()
+        # Initialize DNN backend
+        if backend == "dnn":
+            self._init_dnn()
         elif backend == "simple":
             print("Brownie identifier using simple (OpenCV histogram) backend.")
 
-    def _recompute_simple_embedding(self):
-        """Recompute reference embedding using simple backend from reference photos."""
-        if not self._photos_dir:
-            print("No reference photos directory found. Brownie ID disabled.")
-            self.reference_embedding = None
-            return
-        extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-        from pathlib import Path
-        photos = [p for p in Path(self._photos_dir).iterdir() if p.suffix.lower() in extensions]
-        if not photos:
-            print(f"No photos in {self._photos_dir}. Brownie ID disabled.")
-            self.reference_embedding = None
-            return
-        embeddings = []
-        for p in sorted(photos):
-            img = cv2.imread(str(p))
-            if img is None:
-                continue
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            embeddings.append(self._extract_simple_features(img_rgb))
-        if embeddings:
-            avg = np.mean(embeddings, axis=0).astype(np.float32)
-            norm = np.linalg.norm(avg)
-            if norm > 0:
-                avg = avg / norm
-            self.reference_embedding = avg
-            print(f"Recomputed simple embedding from {len(embeddings)} photos (dim={avg.shape[0]})")
-        else:
-            self.reference_embedding = None
-            print("Failed to recompute embedding. Brownie ID disabled.")
+    def _init_dnn(self):
+        """Load MobileNetV2 ONNX model via OpenCV DNN."""
+        # Search for the ONNX model
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            self.model_path,
+            os.path.join(script_dir, "mobilenetv2-12.onnx"),
+            os.path.expanduser("~/mobilenetv2-12.onnx"),
+        ]
+        onnx_path = None
+        for c in candidates:
+            if c and os.path.exists(c):
+                onnx_path = c
+                break
 
-    def _init_hailo_direct(self):
-        """Initialize Hailo directly in this process (for standalone/compute_embeddings use)."""
-        from hailo_platform import VDevice, HEF, InferVStreams, InputVStreamParams, OutputVStreamParams
-
-        self._hailo_imports = {
-            "InferVStreams": InferVStreams,
-            "InputVStreamParams": InputVStreamParams,
-            "OutputVStreamParams": OutputVStreamParams,
-        }
-
-        self.hef = HEF(self.model_path)
-        params = VDevice.create_params()
-        # Enable round-robin scheduling for device sharing with hailonet in GStreamer pipeline
-        try:
-            from hailo_platform import HailoSchedulingAlgorithm
-            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-            print("Hailo embedding model using ROUND_ROBIN scheduling for device sharing")
-        except (ImportError, AttributeError):
-            pass
-        self.vdevice = VDevice(params)
-        self.network_group = self.vdevice.configure(self.hef)[0]
-        self._activated_ng = self.network_group.activate()
-        self._activated_ng.__enter__()
-
-        input_info = self.hef.get_input_vstream_infos()[0]
-        self._input_name = input_info.name
-        self._input_shape = input_info.shape
-        self._hailo_direct = True
-
-        print(f"Hailo embedding model loaded (direct): input={self._input_name} {self._input_shape}")
-
-    def _start_hailo_worker(self):
-        """Start the Hailo inference worker process."""
-        self._input_queue = mp.Queue(maxsize=4)
-        self._result_queue = mp.Queue(maxsize=4)
-        self._worker = mp.Process(
-            target=_hailo_worker,
-            args=(self.model_path, self._input_queue, self._result_queue),
-            daemon=True,
-        )
-        self._worker.start()
-        # Wait briefly for worker to initialize
-        time.sleep(2)
-        if not self._worker.is_alive():
-            print("Warning: Hailo worker process died. Falling back to simple backend.")
+        if onnx_path is None:
+            print("ERROR: MobileNetV2 ONNX model not found.")
+            print("  Download with: python3 download_model.py")
+            print("  Falling back to simple backend.")
             self.backend = "simple"
-        else:
-            print("Hailo embedding worker process started.")
+            return
+
+        try:
+            self._dnn_net = cv2.dnn.readNetFromONNX(onnx_path)
+            # Use CPU (default)
+            self._dnn_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+            self._dnn_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            print(f"Brownie identifier using DNN backend: {os.path.basename(onnx_path)}")
+        except Exception as e:
+            print(f"ERROR loading ONNX model: {e}")
+            print("  Falling back to simple backend.")
+            self.backend = "simple"
+            self._dnn_net = None
 
     def close(self):
-        """Shut down the worker process or direct Hailo resources."""
-        if self._hailo_direct and hasattr(self, "_activated_ng"):
-            try:
-                self._activated_ng.__exit__(None, None, None)
-            except Exception:
-                pass
-        if self._input_queue is not None:
-            try:
-                self._input_queue.put(None)
-            except Exception:
-                pass
-        if self._worker is not None:
-            self._worker.join(timeout=3)
-            if self._worker.is_alive():
-                self._worker.terminate()
+        """Clean up resources."""
+        pass
 
     def __del__(self):
         self.close()
@@ -230,95 +117,70 @@ class BrownieIdentifier:
 
     def get_embedding(self, crop_rgb):
         """Extract features from an image crop."""
-        if self.backend == "simple":
-            return self._extract_simple_features(crop_rgb)
-        # Lazy init: create Hailo VDevice on first use (after hailonet has started)
-        if self._hailo_lazy and not self._hailo_direct:
-            print("Initializing Hailo embedding model (deferred)...", flush=True)
-            try:
-                self._init_hailo_direct()
-            except Exception as e:
-                print(f"Hailo embedding init failed: {e}", flush=True)
-                print("Falling back to simple (histogram) backend.", flush=True)
-                self.backend = "simple"
-                self._recompute_simple_embedding()
-                return self._extract_simple_features(crop_rgb)
-            self._hailo_lazy = False
-        if self._hailo_direct:
-            # Direct Hailo inference (standalone mode)
-            InferVStreams = self._hailo_imports["InferVStreams"]
-            InputVStreamParams = self._hailo_imports["InputVStreamParams"]
-            OutputVStreamParams = self._hailo_imports["OutputVStreamParams"]
+        if self.backend == "dnn" and self._dnn_net is not None:
+            return self._extract_dnn_features(crop_rgb)
+        return self._extract_simple_features(crop_rgb)
 
-            img = cv2.resize(crop_rgb, (self._input_shape[1], self._input_shape[0])).astype(np.uint8)
-            input_data = np.expand_dims(img, 0)
+    def _extract_dnn_features(self, crop_rgb):
+        """Extract features using MobileNetV2 ONNX on CPU.
 
-            input_vstream_params = InputVStreamParams.make(self.network_group)
-            output_vstream_params = OutputVStreamParams.make(self.network_group)
+        Produces 1000-dim embedding from ImageNet classification logits.
+        These capture high-level visual features (texture, shape, color patterns)
+        far better than hand-crafted histograms.
+        """
+        # Preprocess: resize, normalize with ImageNet stats
+        img = cv2.resize(crop_rgb, (224, 224)).astype(np.float32) / 255.0
+        img = (img - _MEAN) / _STD
 
-            with InferVStreams(self.network_group, input_vstream_params, output_vstream_params) as infer:
-                result = infer.infer({self._input_name: input_data})
+        # OpenCV DNN expects BGR NCHW blob
+        img_bgr = img[:, :, ::-1]  # RGB to BGR
+        blob = cv2.dnn.blobFromImage(img_bgr)
 
-            output_key = list(result.keys())[0]
-            embedding = result[output_key].flatten().astype(np.float32)
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
-            return embedding
-        else:
-            raise RuntimeError("Use submit_crop/poll_results for worker mode")
+        self._dnn_net.setInput(blob)
+        output = self._dnn_net.forward()
+
+        embedding = output.flatten().astype(np.float32)
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding
 
     def _extract_simple_features(self, crop_rgb):
-        """Extract spatial color + texture features using OpenCV. No model needed.
-
-        Uses a 3x3 grid of color histograms (captures WHERE colors appear)
-        plus LBP texture features to distinguish cats with similar coloring
-        but different patterns/markings.
-        """
+        """Extract spatial color + texture features using OpenCV. No model needed."""
         img = cv2.resize(crop_rgb, (128, 128))
         hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
         all_features = []
-
-        # Spatial color histograms: 3x3 grid
         grid = 3
         cell_h, cell_w = 128 // grid, 128 // grid
+
         for row in range(grid):
             for col in range(grid):
                 y1, y2 = row * cell_h, (row + 1) * cell_h
                 x1, x2 = col * cell_w, (col + 1) * cell_w
                 cell = hsv[y1:y2, x1:x2]
-
                 h_hist = cv2.calcHist([cell], [0], None, [12], [0, 180]).flatten()
                 s_hist = cv2.calcHist([cell], [1], None, [8], [0, 256]).flatten()
-
                 for h in [h_hist, s_hist]:
                     total = h.sum()
                     if total > 0:
                         h /= total
-
                 all_features.extend([h_hist, s_hist])
 
-        # LBP-like texture features per 3x3 grid cell
         for row in range(grid):
             for col in range(grid):
                 y1, y2 = row * cell_h, (row + 1) * cell_h
                 x1, x2 = col * cell_w, (col + 1) * cell_w
                 cell = gray[y1:y2, x1:x2]
-
-                # Compute simple gradient magnitudes as texture descriptor
                 gx = cv2.Sobel(cell, cv2.CV_32F, 1, 0, ksize=3)
                 gy = cv2.Sobel(cell, cv2.CV_32F, 0, 1, ksize=3)
                 mag = np.sqrt(gx ** 2 + gy ** 2)
-                angle = np.arctan2(gy, gx) * 180 / np.pi + 180  # 0-360
-
-                # Gradient orientation histogram (8 bins)
+                angle = np.arctan2(gy, gx) * 180 / np.pi + 180
                 grad_hist = np.histogram(angle, bins=8, range=(0, 360), weights=mag)[0].astype(np.float32)
                 total = grad_hist.sum()
                 if total > 0:
                     grad_hist /= total
-
                 all_features.append(grad_hist)
 
         features = np.concatenate(all_features)
@@ -327,38 +189,10 @@ class BrownieIdentifier:
             features = features / norm
         return features.astype(np.float32)
 
-    # --- Identification (async via worker) ---
-
-    def submit_crop(self, tracking_id, crop_rgb):
-        """Send a crop to the Hailo worker for async identification."""
-        if self._input_queue is not None:
-            try:
-                self._input_queue.put_nowait((tracking_id, crop_rgb))
-            except Exception:
-                pass  # Queue full, skip this frame
-
-    def poll_results(self):
-        """Check for completed identification results from the worker."""
-        if self._result_queue is None:
-            return
-        while not self._result_queue.empty():
-            try:
-                track_id, embedding = self._result_queue.get_nowait()
-                if embedding is not None and self.reference_embedding is not None:
-                    similarity = float(np.dot(embedding, self.reference_embedding))
-                    is_brownie = similarity >= self.similarity_threshold
-                    self.cache_result(track_id, is_brownie)
-                    if is_brownie:
-                        print(f"Brownie identified! (track={track_id}, sim={similarity:.3f})")
-                else:
-                    self.cache_result(track_id, False)
-            except Exception:
-                break
-
-    # --- Identification (sync for simple backend) ---
+    # --- Identification ---
 
     def is_brownie(self, crop_rgb):
-        """Synchronous check using any backend (simple or standalone Hailo)."""
+        """Synchronous check: returns (is_brownie, similarity)."""
         if self.reference_embedding is None:
             return False, 0.0
         embedding = self.get_embedding(crop_rgb)
@@ -366,7 +200,6 @@ class BrownieIdentifier:
         return similarity >= self.similarity_threshold, similarity
 
     # --- Tracking cache ---
-    # Stores: tracking_id -> (is_brownie, best_similarity, check_count, timestamp)
 
     def should_check(self, tracking_id):
         """Check multiple frames per track to find the best score.
@@ -375,10 +208,9 @@ class BrownieIdentifier:
             return True
         is_brownie, best_sim, count, ts = self._cache[tracking_id]
         if is_brownie:
-            return False  # Already identified
+            return False
         if count >= 5:
-            return False  # Checked enough times
-        # Re-check every 2 seconds for better angles
+            return False
         return (time.time() - ts) > 2.0
 
     def cache_result(self, tracking_id, is_brownie, similarity=0.0):
@@ -390,7 +222,6 @@ class BrownieIdentifier:
         if tracking_id in self._cache:
             prev_brownie, prev_sim, prev_count, _ = self._cache[tracking_id]
             best_sim = max(prev_sim, similarity)
-            # Promote to Brownie if best score crosses threshold
             is_brownie = is_brownie or prev_brownie or (best_sim >= self.similarity_threshold)
             self._cache[tracking_id] = (is_brownie, best_sim, prev_count + 1, time.time())
         else:
