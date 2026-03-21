@@ -107,6 +107,17 @@ _motion_prev_gray = None
 _motion_cooldown = 0
 _motion_cooldown_frames = int(MOTION_COOLDOWN_SECS * 30)
 
+# Crop saving mode: set SAVE_CROPS=1 to save detected cat crops to disk
+SAVE_CROPS = _env_bool("SAVE_CROPS")
+SAVE_CROPS_DIR = os.environ.get("SAVE_CROPS_DIR", os.path.expanduser("~/brownie_crops_live"))
+_save_crop_count = 0
+
+if SAVE_CROPS:
+    os.makedirs(SAVE_CROPS_DIR, exist_ok=True)
+    print(f"CROP SAVING ENABLED: saving cat crops to {SAVE_CROPS_DIR}")
+    print(f"  Hold up Brownie's printout, then recompute with:")
+    print(f"  python3 compute_embeddings.py --photos-dir {SAVE_CROPS_DIR} --backend hailo")
+
 if ENABLE_MOTION:
     print(f"Motion detection enabled (threshold={MOTION_THRESHOLD}, min_area={MOTION_MIN_AREA}, cooldown={MOTION_COOLDOWN_SECS}s)")
 
@@ -227,6 +238,14 @@ def app_callback(pad, info, user_data):
                     y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
                     if x2 > x1 and y2 > y1:
                         crop = frame[y1:y2, x1:x2].copy()
+                        # Save crops when in capture mode
+                        if SAVE_CROPS:
+                            global _save_crop_count
+                            crop_path = os.path.join(SAVE_CROPS_DIR, f"crop_{_save_crop_count:04d}.jpg")
+                            cv2.imwrite(crop_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+                            _save_crop_count += 1
+                            if _save_crop_count % 5 == 0:
+                                print(f"Saved {_save_crop_count} crops to {SAVE_CROPS_DIR}")
                         # Submit to background thread (non-blocking)
                         brownie_id.submit_async(track_id, crop)
                 except Exception as e:
