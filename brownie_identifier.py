@@ -75,8 +75,8 @@ class BrownieIdentifier:
         # Initialize backend
         if backend == "dnn":
             self._init_dnn()
-            # Start background inference thread (for non-standalone/pipeline mode)
-            if not standalone and self._ort_session is not None:
+            # Start background inference thread for pipeline use
+            if self._ort_session is not None and self.reference_embedding is not None:
                 self._start_infer_thread()
         elif backend == "simple":
             print("Brownie identifier using simple (OpenCV histogram) backend.")
