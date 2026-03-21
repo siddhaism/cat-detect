@@ -135,7 +135,7 @@ class GStreamerDetectionApp(GStreamerApp):
                     + "cropper2. ! "
                     + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
                     + "videoscale qos=false n-threads=2 ! "
-                    + "video/x-raw, pixel-aspect-ratio=1/1 ! "
+                    + "video/x-raw, width=224, height=224, pixel-aspect-ratio=1/1 ! "
                     + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
                     + f"hailonet hef-path={self.embedding_hef} batch-size=1 scheduling-algorithm=1 vdevice-group-id=1 ! "
                     + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! agg2. "
