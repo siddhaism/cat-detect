@@ -225,7 +225,7 @@ def app_callback(pad, info, user_data):
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
 
-    # Map the buffer directly for read+write access (get_numpy_from_buffer may fail
+    # Map the buffer directly for read access (get_numpy_from_buffer may fail
     # on buffers from hailocropper/aggregator pipelines)
     frame = None
     map_info = None
@@ -233,22 +233,17 @@ def app_callback(pad, info, user_data):
     if format and width and height:
         channels = 3 if format == "RGB" else 3
         expected_size = height * width * channels
-        success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
+        success, map_info = buffer.map(Gst.MapFlags.READ)
         if success and len(map_info.data) >= expected_size:
+            # Read-only view; copy so we can use it after unmapping
             frame = np.ndarray(
                 shape=(height, width, channels),
                 dtype=np.uint8,
                 buffer=map_info.data,
-            )
-            _mapped = True
-        elif success:
-            # Log once why mapping failed
-            if user_data.get_count() <= 3:
-                print(f"Buffer map: size={len(map_info.data)}, expected={expected_size}", file=sys.stderr)
+            ).copy()
             buffer.unmap(map_info)
-        else:
-            if user_data.get_count() <= 3:
-                print(f"Buffer map failed (READ|WRITE denied)", file=sys.stderr)
+        elif success:
+            buffer.unmap(map_info)
 
     # Motion detection - skip processing and clear overlay if no motion
     if ENABLE_MOTION and frame is not None:
@@ -272,6 +267,16 @@ def app_callback(pad, info, user_data):
     for detection in hailo_detections:
         if detection.get_label() not in target_classes:
             roi.remove_object(detection)
+
+    # Debug: log frame access and detection info (first few frames only)
+    if filtered_detections and user_data.get_count() <= 10:
+        det = filtered_detections[0]
+        bbox = det.get_bbox()
+        print(f"Frame={'OK' if frame is not None else 'NONE'}, "
+              f"detections_in_roi={len(roi.get_objects_typed(hailo.HAILO_DETECTION))}, "
+              f"bbox=({bbox.xmin():.3f},{bbox.ymin():.3f},{bbox.width():.3f},{bbox.height():.3f}), "
+              f"all_roi_objects={len(roi.get_objects())}",
+              file=sys.stderr)
 
     for detection in filtered_detections:
         label = detection.get_label()
@@ -325,16 +330,8 @@ def app_callback(pad, info, user_data):
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
 
-    # Draw bounding boxes directly on the frame via OpenCV
-    # (frame is a direct view of the buffer memory, so drawing modifies it in place)
-    if frame is not None:
-        detections_to_draw = roi.get_objects_typed(hailo.HAILO_DETECTION)
-        for detection in detections_to_draw:
-            _draw_detection(frame, detection, width, height)
-
-    # Unmap the buffer if we mapped it
-    if _mapped:
-        buffer.unmap(map_info)
+    # Bounding boxes are drawn by hailooverlay (downstream in the pipeline).
+    # Cat detections remain in the ROI; non-cat detections were removed above.
 
     return Gst.PadProbeReturn.OK
 
