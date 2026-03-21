@@ -216,7 +216,7 @@ class BrownieIdentifier:
 
         bindings = self._hailo_configured.create_bindings()
         bindings.input().set_buffer(input_data)
-        self._hailo_configured.run([bindings])
+        self._hailo_configured.run([bindings], timeout_ms=10000)
 
         output = bindings.output().get_buffer()
         embedding = output.flatten().astype(np.float32)
