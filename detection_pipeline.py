@@ -129,7 +129,7 @@ class GStreamerDetectionApp(GStreamerApp):
                 print(f"Cascade pipeline: embedding model={self.embedding_hef}")
                 print(f"  Detection cropper SO: {self.detection_crop_so}")
                 pipeline += (
-                    f"hailocropper so-path={self.detection_crop_so} function-name=create_crops use-letterbox=true resize-method=inter-area internal-offset=true name=cropper2 "
+                    f"hailocropper so-path={self.detection_crop_so} function-name=all_detections use-letterbox=true resize-method=inter-area internal-offset=true name=cropper2 "
                     + "hailoaggregator name=agg2 "
                     + "cropper2. ! queue name=bypass2_q leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! agg2. "
                     + "cropper2. ! "
