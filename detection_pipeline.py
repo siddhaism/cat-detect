@@ -116,7 +116,7 @@ class GStreamerDetectionApp(GStreamerApp):
             + "videoscale qos=false n-threads=2 ! "
             + "video/x-raw, pixel-aspect-ratio=1/1 ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
-            + f"hailonet hef-path={self.hef_path} batch-size=1 scheduling-algorithm=1 {self.thresholds_str} ! "
+            + f"hailonet hef-path={self.hef_path} batch-size=1 scheduling-algorithm=1 vdevice-group-id=1 {self.thresholds_str} ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + f"hailofilter so-path={self.post_process_so} qos=false ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! agg1. "
@@ -137,7 +137,7 @@ class GStreamerDetectionApp(GStreamerApp):
                     + "videoscale qos=false n-threads=2 ! "
                     + "video/x-raw, pixel-aspect-ratio=1/1 ! "
                     + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
-                    + f"hailonet hef-path={self.embedding_hef} batch-size=1 scheduling-algorithm=1 ! "
+                    + f"hailonet hef-path={self.embedding_hef} batch-size=1 scheduling-algorithm=1 vdevice-group-id=1 ! "
                     + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! agg2. "
                     + "agg2. ! "
                 )
