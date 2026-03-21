@@ -225,10 +225,24 @@ def app_callback(pad, info, user_data):
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
 
-    # Retrieve the video frame if required
+    # Map the buffer directly for read+write access (get_numpy_from_buffer may fail
+    # on buffers from hailocropper/aggregator pipelines)
     frame = None
-    if user_data.use_frame and format and width and height:
-        frame = get_numpy_from_buffer(buffer, format, width, height)
+    map_info = None
+    _mapped = False
+    if format and width and height:
+        channels = 3 if format == "RGB" else 3
+        expected_size = height * width * channels
+        success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
+        if success and len(map_info.data) >= expected_size:
+            frame = np.ndarray(
+                shape=(height, width, channels),
+                dtype=np.uint8,
+                buffer=map_info.data,
+            )
+            _mapped = True
+        elif success:
+            buffer.unmap(map_info)
 
     # Motion detection - skip processing and clear overlay if no motion
     if ENABLE_MOTION and frame is not None:
@@ -257,13 +271,6 @@ def app_callback(pad, info, user_data):
         label = detection.get_label()
 
         # --- Brownie identification ---
-        if brownie_id is not None:
-            if frame is None:
-                print(f"Brownie skip: frame is None (format={format}, w={width}, h={height})", file=sys.stderr)
-            else:
-                track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-                track_id = track[0].get_id() if track else None
-                print(f"Brownie debug: track_id={track_id}, should_check={brownie_id.should_check(track_id) if track_id else 'N/A'}", file=sys.stderr)
         if brownie_id is not None and frame is not None:
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             track_id = track[0].get_id() if track else None
@@ -313,17 +320,15 @@ def app_callback(pad, info, user_data):
                     print(f"AWS publish failed (ignored): {e}")
 
     # Draw bounding boxes directly on the frame via OpenCV
+    # (frame is a direct view of the buffer memory, so drawing modifies it in place)
     if frame is not None:
         detections_to_draw = roi.get_objects_typed(hailo.HAILO_DETECTION)
-        if detections_to_draw:
-            for detection in detections_to_draw:
-                _draw_detection(frame, detection, width, height)
-            # Write the modified frame back into the GStreamer buffer
-            success, map_info = buffer.map(Gst.MapFlags.WRITE)
-            if success:
-                frame_bytes = frame.tobytes()
-                map_info.data[:len(frame_bytes)] = frame_bytes
-                buffer.unmap(map_info)
+        for detection in detections_to_draw:
+            _draw_detection(frame, detection, width, height)
+
+    # Unmap the buffer if we mapped it
+    if _mapped:
+        buffer.unmap(map_info)
 
     return Gst.PadProbeReturn.OK
 
