@@ -87,14 +87,24 @@ class BrownieIdentifier:
                 self.reference_embedding = self.reference_embedding / norm
             print(f"Loaded Brownie reference embedding: shape={self.reference_embedding.shape}")
 
-            # Validate dimensions match the backend
+            # Validate dimensions match the backend (skip if hailo — may fall back later)
             if backend == "simple":
                 # 3x3 grid * (12 H-bins + 8 S-bins) + 3x3 grid * 8 gradient bins = 9*20 + 9*8 = 252
                 expected_dim = 252
                 if self.reference_embedding.shape[0] != expected_dim:
-                    print(f"ERROR: Reference embedding dim={self.reference_embedding.shape[0]} but simple backend produces {expected_dim}-dim features.")
+                    print(f"WARNING: Reference embedding dim={self.reference_embedding.shape[0]} != simple backend dim={expected_dim}.")
                     print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend simple")
                     self.reference_embedding = None
+
+            # Store reference photos dir for possible re-computation on fallback
+            self._photos_dir = None
+            for candidate in [
+                os.path.expanduser("~/brownie_photos_cropped"),
+                os.path.expanduser("~/brownie_photos"),
+            ]:
+                if os.path.isdir(candidate):
+                    self._photos_dir = candidate
+                    break
         else:
             self.reference_embedding = None
             print("Warning: No reference embedding loaded. Brownie ID will not work.")
@@ -115,6 +125,37 @@ class BrownieIdentifier:
                 self._start_hailo_worker()
         elif backend == "simple":
             print("Brownie identifier using simple (OpenCV histogram) backend.")
+
+    def _recompute_simple_embedding(self):
+        """Recompute reference embedding using simple backend from reference photos."""
+        if not self._photos_dir:
+            print("No reference photos directory found. Brownie ID disabled.")
+            self.reference_embedding = None
+            return
+        extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        from pathlib import Path
+        photos = [p for p in Path(self._photos_dir).iterdir() if p.suffix.lower() in extensions]
+        if not photos:
+            print(f"No photos in {self._photos_dir}. Brownie ID disabled.")
+            self.reference_embedding = None
+            return
+        embeddings = []
+        for p in sorted(photos):
+            img = cv2.imread(str(p))
+            if img is None:
+                continue
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            embeddings.append(self._extract_simple_features(img_rgb))
+        if embeddings:
+            avg = np.mean(embeddings, axis=0).astype(np.float32)
+            norm = np.linalg.norm(avg)
+            if norm > 0:
+                avg = avg / norm
+            self.reference_embedding = avg
+            print(f"Recomputed simple embedding from {len(embeddings)} photos (dim={avg.shape[0]})")
+        else:
+            self.reference_embedding = None
+            print("Failed to recompute embedding. Brownie ID disabled.")
 
     def _init_hailo_direct(self):
         """Initialize Hailo directly in this process (for standalone/compute_embeddings use)."""
@@ -194,7 +235,14 @@ class BrownieIdentifier:
         # Lazy init: create Hailo VDevice on first use (after hailonet has started)
         if self._hailo_lazy and not self._hailo_direct:
             print("Initializing Hailo embedding model (deferred)...", flush=True)
-            self._init_hailo_direct()
+            try:
+                self._init_hailo_direct()
+            except Exception as e:
+                print(f"Hailo embedding init failed: {e}", flush=True)
+                print("Falling back to simple (histogram) backend.", flush=True)
+                self.backend = "simple"
+                self._recompute_simple_embedding()
+                return self._extract_simple_features(crop_rgb)
             self._hailo_lazy = False
         if self._hailo_direct:
             # Direct Hailo inference (standalone mode)
