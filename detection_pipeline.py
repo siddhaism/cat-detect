@@ -20,7 +20,8 @@ from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
 
 # Custom detection pipeline: reads from shared memory, outputs to shared memory with overlays
 class GStreamerDetectionApp(GStreamerApp):
-    def __init__(self, app_callback, user_data, parser=None):
+    def __init__(self, app_callback, user_data, parser=None, brownie_callback=None):
+        self._brownie_callback = brownie_callback
         if parser is None:
             parser = get_default_parser()
         parser.add_argument(
@@ -101,6 +102,15 @@ class GStreamerDetectionApp(GStreamerApp):
 
         self.create_pipeline()
 
+        # Connect second callback for Brownie identification (after cascade)
+        if self._brownie_callback is not None:
+            brownie_identity = self.pipeline.get_by_name("identity_callback_brownie")
+            if brownie_identity is not None:
+                brownie_identity.connect("handoff", self._brownie_callback, user_data)
+                print("Connected Brownie cascade callback (identity_callback_brownie)")
+            else:
+                print("WARNING: identity_callback_brownie element not found in pipeline")
+
     def get_pipeline_string(self):
         # Stage 1: Detection (YOLO)
         pipeline = (
@@ -121,9 +131,12 @@ class GStreamerDetectionApp(GStreamerApp):
             + f"hailofilter so-path={self.post_process_so} qos=false ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! agg1. "
             + "agg1. ! hailotracker name=hailo_tracker keep-tracked-frames=3 keep-new-frames=3 keep-lost-frames=3 ! "
+            # Callback runs here to filter non-cat detections BEFORE the cascade cropper
+            + "queue name=queue_user_callback leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
+            + "identity name=identity_callback signal-handoffs=true ! "
         )
 
-        # Stage 2: Embedding (ResNet) — cascade on detected regions
+        # Stage 2: Embedding (ResNet) — cascade on detected cat regions only
         if self.embedding_hef and os.path.exists(self.embedding_hef):
             if self.detection_crop_so:
                 print(f"Cascade pipeline: embedding model={self.embedding_hef}")
@@ -133,13 +146,16 @@ class GStreamerDetectionApp(GStreamerApp):
                     + "hailoaggregator name=agg2 "
                     + "cropper2. ! queue name=bypass2_q leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! agg2. "
                     + "cropper2. ! "
-                    + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
+                    + "queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! "
                     + "videoscale qos=false n-threads=2 ! "
                     + "video/x-raw, width=224, height=224, pixel-aspect-ratio=1/1 ! "
-                    + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
+                    + "queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! "
                     + f"hailonet hef-path={self.embedding_hef} batch-size=1 scheduling-algorithm=1 vdevice-group-id=1 ! "
-                    + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! agg2. "
+                    + "queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! agg2. "
                     + "agg2. ! "
+                    # Second callback: read ResNet embeddings for Brownie identification
+                    + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
+                    + "identity name=identity_callback_brownie signal-handoffs=true ! "
                 )
             else:
                 print(f"WARNING: Detection cropper SO not found")
@@ -147,11 +163,9 @@ class GStreamerDetectionApp(GStreamerApp):
         elif self.embedding_hef:
             print(f"WARNING: Embedding HEF not found at {self.embedding_hef}")
 
-        # Stage 3: Callback + overlay + output
+        # Stage 3: Overlay + output
         pipeline += (
-            "queue name=queue_user_callback leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
-            + "identity name=identity_callback signal-handoffs=true ! "
-            + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
+            "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "hailooverlay qos=false line-thickness=4 font-thickness=4 ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "videoconvert n-threads=2 qos=false ! "

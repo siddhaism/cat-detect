@@ -225,30 +225,23 @@ def _draw_detection(frame, detection, width, height):
     cv2.putText(frame, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
 
-# This is the callback function that will be called when data is available from the pipeline
+# First callback: runs BEFORE the cascade cropper.
+# Filters non-cat detections, does motion detection, and simple-backend brownie ID.
 def app_callback(pad, info, user_data):
-    # Get the GstBuffer from the probe info
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Increment frame count
     user_data.increment()
-
-    # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
 
-    # Map the buffer directly for read access (get_numpy_from_buffer may fail
-    # on buffers from hailocropper/aggregator pipelines)
+    # Map buffer for read access (needed for motion detection and simple brownie ID)
     frame = None
-    map_info = None
-    _mapped = False
     if format and width and height:
-        channels = 3 if format == "RGB" else 3
+        channels = 3
         expected_size = height * width * channels
         success, map_info = buffer.map(Gst.MapFlags.READ)
         if success and len(map_info.data) >= expected_size:
-            # Read-only view; copy so we can use it after unmapping
             frame = np.ndarray(
                 shape=(height, width, channels),
                 dtype=np.uint8,
@@ -266,29 +259,80 @@ def app_callback(pad, info, user_data):
                 roi.remove_object(det)
             return Gst.PadProbeReturn.OK
 
-    # Extract detections from the buffer
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    # Filter detections to include only target classes
-    filtered_detections = [
-        detection for detection in hailo_detections
-        if detection.get_label() in target_classes
-    ]
-
-    # Remove non-target detections from ROI so overlay only draws cats
+    # Filter to target classes only (cats) — this ensures only cats go through the cascade cropper
     for detection in hailo_detections:
         if detection.get_label() not in target_classes:
             roi.remove_object(detection)
 
-    for detection in filtered_detections:
+    # Simple-backend brownie ID (runs here since it doesn't need cascade)
+    if brownie_id is not None and frame is not None:
+        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
+            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+            track_id = track[0].get_id() if track else None
+            if track_id is None:
+                continue
+            if brownie_id.should_check(track_id):
+                try:
+                    bbox = detection.get_bbox()
+                    x1 = max(0, int(bbox.xmin() * width))
+                    y1 = max(0, int(bbox.ymin() * height))
+                    x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+                    y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+                    if x2 > x1 and y2 > y1:
+                        crop = frame[y1:y2, x1:x2].copy()
+                        is_brownie, similarity = brownie_id.is_brownie(crop)
+                        brownie_id.cache_result(track_id, is_brownie)
+                        print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
+                        if is_brownie:
+                            _relabel_detection(roi, detection, "Brownie")
+                except Exception as e:
+                    print(f"Brownie ID error: {e}", file=sys.stderr)
+            elif brownie_id.get_cached_result(track_id):
+                _relabel_detection(roi, detection, "Brownie")
+
+    # MQTT / tracking for non-cascade mode (simple backend or no brownie)
+    if not USE_PIPELINE_CASCADE:
+        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
+            label = detection.get_label()
+            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+            if len(track) == 0:
+                continue
+            tracking_id = track[0].get_id()
+            if tracking_id not in emitted_ids:
+                print(f"Detection!: {tracking_id} {label} {detection.get_confidence():.2f}\n")
+                emitted_ids.add(tracking_id)
+                if len(emitted_ids) > MAX_TRACKED_IDS:
+                    emitted_ids.clear()
+                if client is not None:
+                    payload = {"tracking_id": tracking_id, "label": label}
+                    try:
+                        response = client.publish(topic=topic, qos=1, payload=json.dumps(payload))
+                        print(f"Message published: {response}")
+                    except Exception as e:
+                        print(f"AWS publish failed (ignored): {e}")
+
+    return Gst.PadProbeReturn.OK
+
+
+# Second callback: runs AFTER the cascade cropper + ResNet.
+# Reads ResNet embeddings from detections and does Brownie identification.
+# Connected via identity element's "handoff" signal: (element, buffer, user_data)
+def app_callback_brownie(element, buffer, user_data):
+    if buffer is None:
+        return
+
+    roi = hailo.get_roi_from_buffer(buffer)
+
+    for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
         label = detection.get_label()
         track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
         track_id = track[0].get_id() if track else None
 
-        # --- Brownie identification (pipeline cascade mode) ---
-        # ResNet embeddings are attached as HailoTensor sub-objects by the second hailonet
-        if USE_PIPELINE_CASCADE and brownie_ref_embedding is not None and track_id is not None:
+        # Read ResNet embedding tensors attached by the cascade hailonet
+        if brownie_ref_embedding is not None and track_id is not None:
             tensors = detection.get_objects_typed(hailo.HAILO_TENSOR)
             if tensors:
                 try:
@@ -304,61 +348,24 @@ def app_callback(pad, info, user_data):
                         label = "Brownie"
                 except Exception as e:
                     print(f"Brownie cascade error: {e}", file=sys.stderr)
-            elif user_data.get_count() <= 5:
-                # Debug: log when no tensors found (first few detections only)
-                sub_types = [type(o).__name__ for o in detection.get_objects()]
-                print(f"Brownie cascade: no tensors on detection (sub-objects: {sub_types})", file=sys.stderr)
 
-        # --- Brownie identification (simple backend mode) ---
-        elif brownie_id is not None and frame is not None and track_id is not None:
-            if brownie_id.should_check(track_id):
-                try:
-                    bbox = detection.get_bbox()
-                    x1 = max(0, int(bbox.xmin() * width))
-                    y1 = max(0, int(bbox.ymin() * height))
-                    x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
-                    y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
-
-                    if x2 > x1 and y2 > y1:
-                        crop = frame[y1:y2, x1:x2].copy()
-                        is_brownie, similarity = brownie_id.is_brownie(crop)
-                        brownie_id.cache_result(track_id, is_brownie)
-                        print(f"Brownie check: track={track_id}, sim={similarity:.3f}, match={is_brownie}", file=sys.stderr)
-                        if is_brownie:
-                            detection = _relabel_detection(roi, detection, "Brownie")
-                            label = "Brownie"
-                except Exception as e:
-                    print(f"Brownie ID error: {e}", file=sys.stderr)
-            elif brownie_id.get_cached_result(track_id):
-                detection = _relabel_detection(roi, detection, "Brownie")
-                label = "Brownie"
-
-        # --- Tracking and MQTT ---
+        # Tracking and MQTT
         track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
         if len(track) == 0:
             continue
         tracking_id = track[0].get_id()
-        # Emit event only if the tracking ID hasn't been emitted before
         if tracking_id not in emitted_ids:
             print(f"Detection!: {tracking_id} {label} {detection.get_confidence():.2f}\n")
             emitted_ids.add(tracking_id)
             if len(emitted_ids) > MAX_TRACKED_IDS:
                 emitted_ids.clear()
             if client is not None:
-                payload = {
-                    "tracking_id": tracking_id,
-                    "label": label,
-                }
+                payload = {"tracking_id": tracking_id, "label": label}
                 try:
                     response = client.publish(topic=topic, qos=1, payload=json.dumps(payload))
                     print(f"Message published: {response}")
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
-
-    # Bounding boxes are drawn by hailooverlay (downstream in the pipeline).
-    # Cat detections remain in the ROI; non-cat detections were removed above.
-
-    return Gst.PadProbeReturn.OK
 
 
 if __name__ == "__main__":
@@ -371,5 +378,6 @@ if __name__ == "__main__":
     user_data = user_app_callback_class()
     if client is None:
         print("AWS disabled or not configured; running locally without IoT publish.")
-    app = GStreamerDetectionApp(app_callback, user_data)
+    brownie_cb = app_callback_brownie if USE_PIPELINE_CASCADE else None
+    app = GStreamerDetectionApp(app_callback, user_data, brownie_callback=brownie_cb)
     app.run()
