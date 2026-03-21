@@ -89,10 +89,11 @@ class BrownieIdentifier:
 
             # Validate dimensions match the backend
             if backend == "simple":
-                expected_dim = 148  # HSV(36+32+16) + LAB(16+24+24)
+                # 3x3 grid * (12 H-bins + 8 S-bins) + 3x3 grid * 8 gradient bins = 9*20 + 9*8 = 252
+                expected_dim = 252
                 if self.reference_embedding.shape[0] != expected_dim:
                     print(f"ERROR: Reference embedding dim={self.reference_embedding.shape[0]} but simple backend produces {expected_dim}-dim features.")
-                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos/ --backend simple")
+                    print(f"  Recompute with: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend simple")
                     self.reference_embedding = None
         else:
             self.reference_embedding = None
@@ -212,24 +213,59 @@ class BrownieIdentifier:
             raise RuntimeError("Use submit_crop/poll_results for worker mode")
 
     def _extract_simple_features(self, crop_rgb):
-        """Extract color histogram features using OpenCV. No model needed."""
+        """Extract spatial color + texture features using OpenCV. No model needed.
+
+        Uses a 3x3 grid of color histograms (captures WHERE colors appear)
+        plus LBP texture features to distinguish cats with similar coloring
+        but different patterns/markings.
+        """
         img = cv2.resize(crop_rgb, (128, 128))
         hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-        h_hist = cv2.calcHist([hsv], [0], None, [36], [0, 180]).flatten()
-        s_hist = cv2.calcHist([hsv], [1], None, [32], [0, 256]).flatten()
-        v_hist = cv2.calcHist([hsv], [2], None, [16], [0, 256]).flatten()
-        l_hist = cv2.calcHist([lab], [0], None, [16], [0, 256]).flatten()
-        a_hist = cv2.calcHist([lab], [1], None, [24], [0, 256]).flatten()
-        b_hist = cv2.calcHist([lab], [2], None, [24], [0, 256]).flatten()
+        all_features = []
 
-        for h in [h_hist, s_hist, v_hist, l_hist, a_hist, b_hist]:
-            total = h.sum()
-            if total > 0:
-                h /= total
+        # Spatial color histograms: 3x3 grid
+        grid = 3
+        cell_h, cell_w = 128 // grid, 128 // grid
+        for row in range(grid):
+            for col in range(grid):
+                y1, y2 = row * cell_h, (row + 1) * cell_h
+                x1, x2 = col * cell_w, (col + 1) * cell_w
+                cell = hsv[y1:y2, x1:x2]
 
-        features = np.concatenate([h_hist, s_hist, v_hist, l_hist, a_hist, b_hist])
+                h_hist = cv2.calcHist([cell], [0], None, [12], [0, 180]).flatten()
+                s_hist = cv2.calcHist([cell], [1], None, [8], [0, 256]).flatten()
+
+                for h in [h_hist, s_hist]:
+                    total = h.sum()
+                    if total > 0:
+                        h /= total
+
+                all_features.extend([h_hist, s_hist])
+
+        # LBP-like texture features per 3x3 grid cell
+        for row in range(grid):
+            for col in range(grid):
+                y1, y2 = row * cell_h, (row + 1) * cell_h
+                x1, x2 = col * cell_w, (col + 1) * cell_w
+                cell = gray[y1:y2, x1:x2]
+
+                # Compute simple gradient magnitudes as texture descriptor
+                gx = cv2.Sobel(cell, cv2.CV_32F, 1, 0, ksize=3)
+                gy = cv2.Sobel(cell, cv2.CV_32F, 0, 1, ksize=3)
+                mag = np.sqrt(gx ** 2 + gy ** 2)
+                angle = np.arctan2(gy, gx) * 180 / np.pi + 180  # 0-360
+
+                # Gradient orientation histogram (8 bins)
+                grad_hist = np.histogram(angle, bins=8, range=(0, 360), weights=mag)[0].astype(np.float32)
+                total = grad_hist.sum()
+                if total > 0:
+                    grad_hist /= total
+
+                all_features.append(grad_hist)
+
+        features = np.concatenate(all_features)
         norm = np.linalg.norm(features)
         if norm > 0:
             features = features / norm
