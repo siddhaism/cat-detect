@@ -242,7 +242,13 @@ def app_callback(pad, info, user_data):
             )
             _mapped = True
         elif success:
+            # Log once why mapping failed
+            if user_data.get_count() <= 3:
+                print(f"Buffer map: size={len(map_info.data)}, expected={expected_size}", file=sys.stderr)
             buffer.unmap(map_info)
+        else:
+            if user_data.get_count() <= 3:
+                print(f"Buffer map failed (READ|WRITE denied)", file=sys.stderr)
 
     # Motion detection - skip processing and clear overlay if no motion
     if ENABLE_MOTION and frame is not None:
