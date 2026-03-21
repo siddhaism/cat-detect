@@ -37,7 +37,7 @@ class BrownieIdentifier:
         embedding_path,
         model_path=None,
         backend="hailo",
-        similarity_threshold=0.80,
+        similarity_threshold=0.90,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
@@ -387,50 +387,22 @@ class BrownieIdentifier:
 
     @staticmethod
     def compute_color_histogram(crop_rgb):
-        """Compute spatial color + texture features for fur pattern comparison.
+        """Compute a global HSV color histogram for fur color comparison.
 
-        Uses a 3x3 grid to capture WHERE colors appear on the cat's body,
-        not just overall color distribution. This distinguishes cats with
-        different markings even if their overall colors are similar.
+        Uses a global (non-spatial) histogram because bounding box crops
+        vary in position/size, making spatial grids unreliable.
         """
-        img = cv2.resize(crop_rgb, (128, 128))
+        img = cv2.resize(crop_rgb, (64, 64))
         hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-        all_features = []
-        grid = 3
-        cell_h, cell_w = 128 // grid, 128 // grid
-
-        for row in range(grid):
-            for col in range(grid):
-                y1, y2 = row * cell_h, (row + 1) * cell_h
-                x1, x2 = col * cell_w, (col + 1) * cell_w
-
-                cell_hsv = hsv[y1:y2, x1:x2]
-                h_hist = cv2.calcHist([cell_hsv], [0], None, [12], [0, 180]).flatten()
-                s_hist = cv2.calcHist([cell_hsv], [1], None, [8], [0, 256]).flatten()
-                for h in [h_hist, s_hist]:
-                    total = h.sum()
-                    if total > 0:
-                        h /= total
-                all_features.extend([h_hist, s_hist])
-
-                cell_gray = gray[y1:y2, x1:x2]
-                gx = cv2.Sobel(cell_gray, cv2.CV_32F, 1, 0, ksize=3)
-                gy = cv2.Sobel(cell_gray, cv2.CV_32F, 0, 1, ksize=3)
-                mag = np.sqrt(gx ** 2 + gy ** 2)
-                angle = np.arctan2(gy, gx) * 180 / np.pi + 180
-                grad_hist = np.histogram(angle, bins=8, range=(0, 360), weights=mag)[0].astype(np.float32)
-                total = grad_hist.sum()
-                if total > 0:
-                    grad_hist /= total
-                all_features.append(grad_hist)
-
-        features = np.concatenate(all_features)
-        norm = np.linalg.norm(features)
+        # H: 24 bins, S: 12 bins, V: 12 bins = 48 values
+        h_hist = cv2.calcHist([hsv], [0], None, [24], [0, 180]).flatten()
+        s_hist = cv2.calcHist([hsv], [1], None, [12], [0, 256]).flatten()
+        v_hist = cv2.calcHist([hsv], [2], None, [12], [0, 256]).flatten()
+        hist = np.concatenate([h_hist, s_hist, v_hist]).astype(np.float32)
+        norm = np.linalg.norm(hist)
         if norm > 0:
-            features /= norm
-        return features.astype(np.float32)
+            hist /= norm
+        return hist
 
     def _color_similarity(self, crop_rgb):
         """Compare crop's color distribution to Brownie's reference colors."""
@@ -463,10 +435,10 @@ class BrownieIdentifier:
                 if self.reference_embedding is not None:
                     emb_sim = float(np.dot(embedding, self.reference_embedding))
                     color_sim = self._color_similarity(crop_rgb)
-                    # Color is the primary signal for cat identity (fur pattern);
+                    # Color histogram is the primary signal for cat identity;
                     # ArcFace (human face model) is unreliable for cats.
                     if self._color_reference is not None:
-                        combined = 0.25 * emb_sim + 0.75 * color_sim
+                        combined = color_sim
                     else:
                         combined = emb_sim
                     self.cache_result(track_id, combined >= self.similarity_threshold, combined)
