@@ -55,6 +55,7 @@ class BrownieIdentifier:
         self._hailo_configured = None
         self._hailo_vdevice = None
         self._hailo_input_shape = None
+        self._hailo_output_dim = 0
 
         # Async inference queue
         self._infer_queue = None
@@ -106,7 +107,7 @@ class BrownieIdentifier:
     def _get_expected_dim(self):
         """Return expected embedding dimension for the current backend config."""
         if self.backend == "hailo":
-            return 1000
+            return self._hailo_output_dim  # Discovered at init from the HEF
         elif self.backend == "dnn":
             return 1280 if self._penultimate_output else 1000
         elif self.backend == "simple":
@@ -116,18 +117,24 @@ class BrownieIdentifier:
     # --- Hailo backend ---
 
     def _init_hailo(self):
-        """Load MobileNetV2 HEF on the Hailo-8 via hailo_platform.
+        """Load an embedding model HEF on the Hailo-8 via hailo_platform.
 
-        Uses the HailoRT scheduler to share the device with GStreamer's
-        hailonet element (which runs YOLO).
+        Searches for ArcFace or MobileNetV2 HEF files. ArcFace models
+        (512-dim embeddings) are preferred as they're designed for identity
+        recognition. Uses the HailoRT scheduler to share the device with
+        GStreamer's hailonet element (which runs YOLO).
         """
         script_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
             self.model_path,
+            # ArcFace / embedding models (preferred for identity matching)
+            os.path.join(script_dir, "cat_embedding_model.hef"),
+            os.path.expanduser("~/repos/cat-feeder/models/cat_embedding_model.hef"),
+            os.path.join(script_dir, "arcface_mobilefacenet.hef"),
+            "/usr/local/hailo/resources/models/hailo8/arcface_mobilefacenet.hef",
+            # MobileNetV2 classification models (fallback)
             os.path.join(script_dir, "mobilenet_v2.hef"),
             os.path.expanduser("~/mobilenet_v2.hef"),
-            # Hailo model zoo default locations
-            os.path.join(script_dir, "mobilenetv2.hef"),
             "/usr/share/hailo-models/mobilenet_v2.hef",
         ]
         hef_path = None
@@ -137,11 +144,11 @@ class BrownieIdentifier:
                 break
 
         if hef_path is None:
-            print("MobileNetV2 HEF not found. Searched:")
+            print("No embedding HEF model found. Searched:")
             for c in candidates:
                 if c:
                     print(f"  - {c}")
-            print("  Download with: python3 download_model.py --hailo")
+            print("  Copy cat_embedding_model.hef to the repo, or compile MobileNetV2.")
             print("  Falling back to dnn (CPU) backend.")
             self.backend = "dnn"
             return
@@ -170,12 +177,16 @@ class BrownieIdentifier:
 
             self._hailo_configured = infer_model.configure()
 
-            # Get expected input shape for preprocessing
-            input_info = infer_model.input()
-            self._hailo_input_shape = input_info.shape  # e.g., (224, 224, 3) or (1, 224, 224, 3)
+            # Discover input/output shapes from the model
+            self._hailo_input_shape = infer_model.input().shape
+            output_shape = infer_model.output().shape
+            # Output dim: flatten the shape (e.g., (512,) -> 512, (1, 1000) -> 1000)
+            self._hailo_output_dim = 1
+            for d in output_shape:
+                self._hailo_output_dim *= d
 
-            print(f"Brownie identifier using HAILO backend (HailoRT, 1000-dim): {os.path.basename(hef_path)}")
-            print(f"  Input shape: {self._hailo_input_shape}")
+            print(f"Brownie identifier using HAILO backend ({self._hailo_output_dim}-dim): {os.path.basename(hef_path)}")
+            print(f"  Input: {self._hailo_input_shape}, Output: {output_shape}")
 
         except ImportError:
             print("hailo_platform not installed — Hailo backend unavailable.")
@@ -189,10 +200,11 @@ class BrownieIdentifier:
             self._hailo_vdevice = None
 
     def _extract_hailo_features(self, crop_rgb):
-        """Extract features using MobileNetV2 on the Hailo-8 accelerator.
+        """Extract embedding features on the Hailo-8 accelerator.
 
-        The HEF model includes quantization, so we send uint8 RGB input.
-        HailoRT handles dequantization of the output to float32.
+        Supports ArcFace (512-dim, 112x112 input) and MobileNetV2 (1000-dim,
+        224x224 input). The HEF model includes quantization, so we send uint8
+        RGB input. HailoRT handles dequantization of the output to float32.
         """
         # Resize to model input size (typically 224x224)
         input_h = self._hailo_input_shape[0] if len(self._hailo_input_shape) == 3 else self._hailo_input_shape[1]
