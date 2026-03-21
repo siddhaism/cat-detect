@@ -41,7 +41,7 @@ class BrownieIdentifier:
         self._max_cache = 500
 
         # DNN model (loaded lazily)
-        self._dnn_net = None
+        self._ort_session = None
 
         # Load reference embedding
         if embedding_path and os.path.exists(embedding_path):
@@ -73,8 +73,7 @@ class BrownieIdentifier:
             print("Brownie identifier using simple (OpenCV histogram) backend.")
 
     def _init_dnn(self):
-        """Load MobileNetV2 ONNX model via OpenCV DNN."""
-        # Search for the ONNX model
+        """Load MobileNetV2 ONNX model via ONNX Runtime."""
         script_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
             self.model_path,
@@ -95,16 +94,23 @@ class BrownieIdentifier:
             return
 
         try:
-            self._dnn_net = cv2.dnn.readNetFromONNX(onnx_path)
-            # Use CPU (default)
-            self._dnn_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-            self._dnn_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-            print(f"Brownie identifier using DNN backend: {os.path.basename(onnx_path)}")
+            import onnxruntime as ort
+            self._ort_session = ort.InferenceSession(
+                onnx_path,
+                providers=["CPUExecutionProvider"],
+            )
+            self._ort_input_name = self._ort_session.get_inputs()[0].name
+            print(f"Brownie identifier using DNN backend (onnxruntime): {os.path.basename(onnx_path)}")
+        except ImportError:
+            print("ERROR: onnxruntime not installed. Run: pip install onnxruntime")
+            print("  Falling back to simple backend.")
+            self.backend = "simple"
+            self._ort_session = None
         except Exception as e:
             print(f"ERROR loading ONNX model: {e}")
             print("  Falling back to simple backend.")
             self.backend = "simple"
-            self._dnn_net = None
+            self._ort_session = None
 
     def close(self):
         """Clean up resources."""
@@ -117,12 +123,12 @@ class BrownieIdentifier:
 
     def get_embedding(self, crop_rgb):
         """Extract features from an image crop."""
-        if self.backend == "dnn" and self._dnn_net is not None:
+        if self.backend == "dnn" and self._ort_session is not None:
             return self._extract_dnn_features(crop_rgb)
         return self._extract_simple_features(crop_rgb)
 
     def _extract_dnn_features(self, crop_rgb):
-        """Extract features using MobileNetV2 ONNX on CPU.
+        """Extract features using MobileNetV2 ONNX on CPU via ONNX Runtime.
 
         Produces 1000-dim embedding from ImageNet classification logits.
         These capture high-level visual features (texture, shape, color patterns)
@@ -132,14 +138,13 @@ class BrownieIdentifier:
         img = cv2.resize(crop_rgb, (224, 224)).astype(np.float32) / 255.0
         img = (img - _MEAN) / _STD
 
-        # OpenCV DNN expects BGR NCHW blob
-        img_bgr = img[:, :, ::-1]  # RGB to BGR
-        blob = cv2.dnn.blobFromImage(img_bgr)
+        # ONNX Runtime expects NCHW float32
+        img_chw = np.transpose(img, (2, 0, 1))  # HWC -> CHW
+        input_tensor = np.expand_dims(img_chw, 0)  # Add batch dim
 
-        self._dnn_net.setInput(blob)
-        output = self._dnn_net.forward()
+        output = self._ort_session.run(None, {self._ort_input_name: input_tensor})
 
-        embedding = output.flatten().astype(np.float32)
+        embedding = output[0].flatten().astype(np.float32)
         norm = np.linalg.norm(embedding)
         if norm > 0:
             embedding = embedding / norm
