@@ -226,10 +226,15 @@ def app_callback(pad, info, user_data):
             track_id = track[0].get_id() if track else None
             if track_id is None:
                 continue
+            bbox = detection.get_bbox()
+            # Compute bbox center (normalized 0-1)
+            cx = bbox.xmin() + bbox.width() / 2
+            cy = bbox.ymin() + bbox.height() / 2
+            # Check spatial inheritance from nearby recent Brownie tracks
+            inherited = brownie_id.inherit_nearby_brownie(track_id, cx, cy)
             # Submit new crops only for high-confidence detections
-            if detection.get_confidence() >= BROWNIE_MIN_CONFIDENCE and brownie_id.should_check(track_id):
+            if not inherited and detection.get_confidence() >= BROWNIE_MIN_CONFIDENCE and brownie_id.should_check(track_id):
                 try:
-                    bbox = detection.get_bbox()
                     x1 = max(0, int(bbox.xmin() * width))
                     y1 = max(0, int(bbox.ymin() * height))
                     x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
@@ -251,6 +256,7 @@ def app_callback(pad, info, user_data):
             # Always relabel if cached as Brownie (every frame, regardless of confidence)
             if brownie_id.get_cached_result(track_id):
                 _relabel_detection(roi, detection, "Brownie")
+                brownie_id.register_brownie_position(track_id, cx, cy)
 
     # Tracking and MQTT
     for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):

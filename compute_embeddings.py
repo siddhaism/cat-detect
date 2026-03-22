@@ -88,6 +88,12 @@ def main():
         f"(shape: {avg_embedding.shape}, from {len(embeddings)} photos)"
     )
 
+    # Save gallery (individual embeddings for max-similarity matching)
+    gallery = np.array(embeddings, dtype=np.float32)
+    gallery_output = args.output.replace(".npy", "_gallery.npy")
+    np.save(gallery_output, gallery)
+    print(f"Saved embedding gallery to {gallery_output} (shape: {gallery.shape})")
+
     # Also compute and save a color histogram reference
     color_hists = []
     for photo_path in sorted(photos):
@@ -106,6 +112,12 @@ def main():
         color_output = args.output.replace(".npy", "_color.npy")
         np.save(color_output, avg_color)
         print(f"Saved color reference to {color_output} (shape: {avg_color.shape})")
+
+        # Save color gallery
+        gallery_color = np.array(color_hists, dtype=np.float32)
+        gallery_color_output = args.output.replace(".npy", "_gallery_color.npy")
+        np.save(gallery_color_output, gallery_color)
+        print(f"Saved color gallery to {gallery_color_output} (shape: {gallery_color.shape})")
 
 
 if __name__ == "__main__":

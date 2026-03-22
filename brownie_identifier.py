@@ -43,9 +43,18 @@ class BrownieIdentifier:
         self.backend = backend
         self.model_path = model_path
 
-        # Tracking cache: tracking_id -> (is_brownie, best_similarity, check_count, timestamp)
+        # Tracking cache: tracking_id -> (is_brownie, scores_list, timestamp)
         self._cache = {}
         self._max_cache = 500
+
+        # Gallery of individual reference embeddings (for max-similarity matching)
+        self._gallery_embeddings = None
+        self._gallery_colors = None
+
+        # Cross-track spatial persistence
+        self._brownie_positions = {}  # track_id -> (cx, cy, timestamp)
+        self._spatial_threshold = 0.20  # 20% of frame dimension
+        self._spatial_timeout = 3.0  # seconds
 
         # DNN model (onnxruntime)
         self._ort_session = None
@@ -85,6 +94,25 @@ class BrownieIdentifier:
         else:
             print("No color reference found. Run: python3 compute_embeddings.py --photos-dir ~/brownie_photos_cropped/ --backend <backend>")
             print("  Color histogram will provide supplementary discrimination.")
+
+        # Load gallery embeddings (individual per-photo embeddings for max-similarity)
+        if embedding_path:
+            gallery_path = embedding_path.replace(".npy", "_gallery.npy")
+            if os.path.exists(gallery_path):
+                gallery = np.load(gallery_path).astype(np.float32)
+                # Normalize each row
+                norms = np.linalg.norm(gallery, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                self._gallery_embeddings = gallery / norms
+                print(f"Loaded Brownie gallery: {self._gallery_embeddings.shape[0]} embeddings")
+
+            gallery_color_path = embedding_path.replace(".npy", "_gallery_color.npy")
+            if os.path.exists(gallery_color_path):
+                gallery_c = np.load(gallery_color_path).astype(np.float32)
+                norms = np.linalg.norm(gallery_c, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                self._gallery_colors = gallery_c / norms
+                print(f"Loaded Brownie color gallery: {self._gallery_colors.shape[0]} histograms")
 
         # Initialize backend (with fallback chain: hailo -> dnn -> simple)
         if backend == "hailo":
@@ -411,6 +439,69 @@ class BrownieIdentifier:
         hist = self.compute_color_histogram(crop_rgb)
         return float(np.dot(hist, self._color_reference))
 
+    # --- Center crop to reduce background noise ---
+
+    @staticmethod
+    def _center_crop(crop_rgb, ratio=0.7):
+        """Crop inner portion of bbox to reduce background contamination."""
+        h, w = crop_rgb.shape[:2]
+        margin_y = int(h * (1 - ratio) / 2)
+        margin_x = int(w * (1 - ratio) / 2)
+        if margin_y > 0 and margin_x > 0 and h > 2 * margin_y and w > 2 * margin_x:
+            return crop_rgb[margin_y:h - margin_y, margin_x:w - margin_x]
+        return crop_rgb
+
+    # --- Gallery matching ---
+
+    def _gallery_emb_similarity(self, embedding):
+        """Max cosine similarity against all gallery embeddings."""
+        if self._gallery_embeddings is not None:
+            sims = self._gallery_embeddings @ embedding
+            return float(np.max(sims))
+        if self.reference_embedding is not None:
+            return float(np.dot(embedding, self.reference_embedding))
+        return 0.0
+
+    def _gallery_color_similarity(self, crop_rgb):
+        """Max cosine similarity against all gallery color histograms."""
+        hist = self.compute_color_histogram(crop_rgb)
+        if self._gallery_colors is not None:
+            sims = self._gallery_colors @ hist
+            return float(np.max(sims))
+        if self._color_reference is not None:
+            return float(np.dot(hist, self._color_reference))
+        return 1.0  # No color ref → don't filter
+
+    # --- Cross-track spatial persistence ---
+
+    def register_brownie_position(self, track_id, cx, cy):
+        """Record position of a confirmed Brownie track."""
+        self._brownie_positions[track_id] = (cx, cy, time.time())
+        # Prune old entries
+        now = time.time()
+        self._brownie_positions = {
+            k: v for k, v in self._brownie_positions.items()
+            if now - v[2] < self._spatial_timeout
+        }
+
+    def inherit_nearby_brownie(self, track_id, cx, cy):
+        """Check if a new track is near a recent Brownie and inherit identification."""
+        if track_id in self._cache:
+            return False  # Already has its own result
+        now = time.time()
+        for tid, (bx, by, ts) in self._brownie_positions.items():
+            if tid == track_id:
+                continue
+            if now - ts > self._spatial_timeout:
+                continue
+            dist = ((cx - bx) ** 2 + (cy - by) ** 2) ** 0.5
+            if dist < self._spatial_threshold:
+                # Inherit: seed cache as Brownie
+                self._cache[track_id] = (True, [self.similarity_threshold + 0.05], now)
+                print(f"Brownie inherited: track={track_id} from track={tid} (dist={dist:.3f})", file=sys.stderr)
+                return True
+        return False
+
     # --- Async inference (shared by all backends) ---
 
     def _start_infer_thread(self):
@@ -431,12 +522,13 @@ class BrownieIdentifier:
                 break
             track_id, crop_rgb = item
             try:
-                embedding = self.get_embedding(crop_rgb)
-                if self.reference_embedding is not None:
-                    emb_sim = float(np.dot(embedding, self.reference_embedding))
-                    color_sim = self._color_similarity(crop_rgb)
+                cropped = self._center_crop(crop_rgb)
+                embedding = self.get_embedding(cropped)
+                if self.reference_embedding is not None or self._gallery_embeddings is not None:
+                    emb_sim = self._gallery_emb_similarity(embedding)
+                    color_sim = self._gallery_color_similarity(cropped)
                     # Blend both signals: embedding is the stronger discriminator
-                    if self._color_reference is not None:
+                    if self._color_reference is not None or self._gallery_colors is not None:
                         combined = 0.4 * color_sim + 0.6 * emb_sim
                     else:
                         combined = emb_sim
@@ -514,7 +606,8 @@ class BrownieIdentifier:
         return (time.time() - ts) > 1.0
 
     def cache_result(self, tracking_id, is_brownie, similarity=0.0):
-        """Cache identification result. Decision based on average of all scores."""
+        """Cache identification result. Decision based on average of all scores.
+        Strong matches (threshold + 0.10) are accepted on first check."""
         if len(self._cache) > self._max_cache:
             oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][2])
             for k in oldest:
@@ -524,9 +617,13 @@ class BrownieIdentifier:
             scores = prev_scores + [similarity]
         else:
             scores = [similarity]
-        # Require average score above threshold AND at least 2 checks
         avg_sim = sum(scores) / len(scores)
-        is_brownie = avg_sim >= self.similarity_threshold and len(scores) >= 2
+        high_conf_threshold = self.similarity_threshold + 0.10
+        # Accept on first check if score is very high, otherwise require 2+ checks
+        if avg_sim >= high_conf_threshold:
+            is_brownie = True
+        else:
+            is_brownie = avg_sim >= self.similarity_threshold and len(scores) >= 2
         self._cache[tracking_id] = (is_brownie, scores, time.time())
 
     def get_cached_result(self, tracking_id):
