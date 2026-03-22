@@ -37,7 +37,7 @@ class BrownieIdentifier:
         embedding_path,
         model_path=None,
         backend="hailo",
-        similarity_threshold=0.58,
+        similarity_threshold=0.55,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
@@ -749,28 +749,15 @@ class BrownieIdentifier:
                 embedding = self.get_embedding(cropped)
                 if self.reference_embedding is not None or self._gallery_embeddings is not None:
                     emb_sim = self._gallery_emb_similarity(embedding)
-                    color_sim = self._gallery_color_similarity(cropped)
-                    # Compute additional feature similarities
-                    tex_sim = self._texture_similarity(cropped)
-                    shape_sim = self._shape_similarity(cropped)
-                    edge_sim = self._edge_similarity(cropped)
-                    # Weighted blend: embedding primary, texture secondary, others supplementary
-                    has_aux = (self._texture_reference is not None or self._gallery_texture is not None)
-                    if has_aux:
-                        combined = 0.50 * emb_sim + 0.25 * tex_sim + 0.15 * edge_sim + 0.10 * shape_sim
-                    else:
-                        combined = emb_sim
+                    # Embedding is the only discriminative signal for individual cat identity
+                    combined = emb_sim
                     self.cache_result(track_id, combined >= self.similarity_threshold, combined)
                     # Debug output
                     if track_id in self._cache:
                         _, scores, _ = self._cache[track_id]
                         avg = sum(scores) / len(scores)
                         cached_result = self._cache[track_id][0]
-                        aux_str = ""
-                        if has_aux:
-                            aux_str = f", tex={tex_sim:.3f}, edge={edge_sim:.3f}, shape={shape_sim:.3f}"
-                        color_str = f", color={color_sim:.3f}" if self._color_reference is not None else ""
-                        print(f"Brownie check [{self.backend}]: track={track_id}, emb={emb_sim:.3f}{color_str}{aux_str}, combined={combined:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
+                        print(f"Brownie check [{self.backend}]: track={track_id}, emb={emb_sim:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
             except Exception as e:
                 print(f"Brownie {self.backend} error: {e}", file=sys.stderr)
 
