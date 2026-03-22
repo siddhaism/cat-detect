@@ -817,9 +817,9 @@ class BrownieIdentifier:
         if tracking_id not in self._cache:
             return True
         is_brownie, scores, ts = self._cache[tracking_id]
-        if is_brownie and len(scores) >= 2:
+        if is_brownie and len(scores) >= 3:
             return False  # Confidently identified
-        if len(scores) >= 5:
+        if len(scores) >= 7:
             return False  # Max checks reached
         return (time.time() - ts) > 1.0
 
@@ -836,12 +836,12 @@ class BrownieIdentifier:
         else:
             scores = [similarity]
         avg_sim = sum(scores) / len(scores)
-        high_conf_threshold = self.similarity_threshold + 0.10
-        # Accept on first check if score is very high, otherwise require 2+ checks
+        high_conf_threshold = self.similarity_threshold + 0.15
+        # Accept on first check if score is very high, otherwise require 3+ checks
         if avg_sim >= high_conf_threshold:
             is_brownie = True
         else:
-            is_brownie = avg_sim >= self.similarity_threshold and len(scores) >= 2
+            is_brownie = avg_sim >= self.similarity_threshold and len(scores) >= 3
         self._cache[tracking_id] = (is_brownie, scores, time.time())
 
     def get_cached_result(self, tracking_id):
