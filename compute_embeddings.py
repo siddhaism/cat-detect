@@ -119,6 +119,33 @@ def main():
         np.save(gallery_color_output, gallery_color)
         print(f"Saved color gallery to {gallery_color_output} (shape: {gallery_color.shape})")
 
+    # Compute and save LBP texture features
+    def _save_feature(compute_fn, name):
+        features = []
+        for photo_path in sorted(photos):
+            img = cv2.imread(str(photo_path))
+            if img is None:
+                continue
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            feat = compute_fn(img_rgb)
+            features.append(feat)
+        if features:
+            avg = np.mean(features, axis=0).astype(np.float32)
+            norm = np.linalg.norm(avg)
+            if norm > 0:
+                avg /= norm
+            ref_path = args.output.replace(".npy", f"_{name}.npy")
+            np.save(ref_path, avg)
+            print(f"Saved {name} reference to {ref_path} (shape: {avg.shape})")
+            gallery_arr = np.array(features, dtype=np.float32)
+            gal_path = args.output.replace(".npy", f"_gallery_{name}.npy")
+            np.save(gal_path, gallery_arr)
+            print(f"Saved {name} gallery to {gal_path} (shape: {gallery_arr.shape})")
+
+    _save_feature(BrownieIdentifier.compute_lbp_features, "texture")
+    _save_feature(BrownieIdentifier.compute_shape_features, "shape")
+    _save_feature(BrownieIdentifier.compute_edge_features, "edge")
+
 
 if __name__ == "__main__":
     main()

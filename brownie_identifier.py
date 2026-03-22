@@ -50,6 +50,12 @@ class BrownieIdentifier:
         # Gallery of individual reference embeddings (for max-similarity matching)
         self._gallery_embeddings = None
         self._gallery_colors = None
+        self._gallery_texture = None  # LBP texture gallery
+        self._texture_reference = None  # Averaged LBP texture reference
+        self._shape_reference = None  # Averaged shape/proportion reference
+        self._gallery_shape = None  # Shape gallery
+        self._edge_reference = None  # Averaged edge density reference
+        self._gallery_edge = None  # Edge density gallery
 
         # Cross-track spatial persistence
         self._brownie_positions = {}  # track_id -> (cx, cy, timestamp)
@@ -113,6 +119,45 @@ class BrownieIdentifier:
                 norms[norms == 0] = 1
                 self._gallery_colors = gallery_c / norms
                 print(f"Loaded Brownie color gallery: {self._gallery_colors.shape[0]} histograms")
+
+            # Load texture (LBP) references
+            texture_path = embedding_path.replace(".npy", "_texture.npy")
+            if os.path.exists(texture_path):
+                self._texture_reference = np.load(texture_path).astype(np.float32)
+                print(f"Loaded Brownie texture reference: shape={self._texture_reference.shape}")
+            gallery_texture_path = embedding_path.replace(".npy", "_gallery_texture.npy")
+            if os.path.exists(gallery_texture_path):
+                gt = np.load(gallery_texture_path).astype(np.float32)
+                norms = np.linalg.norm(gt, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                self._gallery_texture = gt / norms
+                print(f"Loaded Brownie texture gallery: {self._gallery_texture.shape[0]} entries")
+
+            # Load shape/proportion references
+            shape_path = embedding_path.replace(".npy", "_shape.npy")
+            if os.path.exists(shape_path):
+                self._shape_reference = np.load(shape_path).astype(np.float32)
+                print(f"Loaded Brownie shape reference: shape={self._shape_reference.shape}")
+            gallery_shape_path = embedding_path.replace(".npy", "_gallery_shape.npy")
+            if os.path.exists(gallery_shape_path):
+                gs = np.load(gallery_shape_path).astype(np.float32)
+                norms = np.linalg.norm(gs, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                self._gallery_shape = gs / norms
+                print(f"Loaded Brownie shape gallery: {self._gallery_shape.shape[0]} entries")
+
+            # Load edge density references
+            edge_path = embedding_path.replace(".npy", "_edge.npy")
+            if os.path.exists(edge_path):
+                self._edge_reference = np.load(edge_path).astype(np.float32)
+                print(f"Loaded Brownie edge reference: shape={self._edge_reference.shape}")
+            gallery_edge_path = embedding_path.replace(".npy", "_gallery_edge.npy")
+            if os.path.exists(gallery_edge_path):
+                ge = np.load(gallery_edge_path).astype(np.float32)
+                norms = np.linalg.norm(ge, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                self._gallery_edge = ge / norms
+                print(f"Loaded Brownie edge gallery: {self._gallery_edge.shape[0]} entries")
 
         # Initialize backend (with fallback chain: hailo -> dnn -> simple)
         if backend == "hailo":
@@ -439,6 +484,184 @@ class BrownieIdentifier:
         hist = self.compute_color_histogram(crop_rgb)
         return float(np.dot(hist, self._color_reference))
 
+    # --- LBP texture features (lighting-invariant fur pattern) ---
+
+    @staticmethod
+    def compute_lbp_features(crop_rgb):
+        """Compute Local Binary Pattern histogram for fur texture analysis.
+
+        LBP compares each pixel to its 8 neighbors, producing a pattern code.
+        Uses uniform LBP (58 uniform patterns + 1 non-uniform bin = 59 bins)
+        across a 3x3 spatial grid = 531 dimensions.
+        Lighting-invariant since it only uses relative intensity comparisons.
+        """
+        img = cv2.resize(crop_rgb, (96, 96))
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+        # Compute LBP manually (8 neighbors, radius 1)
+        padded = cv2.copyMakeBorder(gray, 1, 1, 1, 1, cv2.BORDER_REFLECT)
+        h, w = gray.shape
+        lbp = np.zeros((h, w), dtype=np.uint8)
+        # 8 neighbor offsets (clockwise from top-left)
+        offsets = [(-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1)]
+        for bit, (dy, dx) in enumerate(offsets):
+            neighbor = padded[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+            lbp |= ((neighbor >= gray).astype(np.uint8) << bit)
+
+        # Map to uniform LBP (58 uniform + 1 non-uniform = 59 bins)
+        uniform_map = np.full(256, 58, dtype=np.uint8)  # default: non-uniform
+        uid = 0
+        for val in range(256):
+            # Count bit transitions (0->1 or 1->0) in circular binary
+            bits = format(val, '08b')
+            transitions = sum(bits[i] != bits[(i + 1) % 8] for i in range(8))
+            if transitions <= 2:
+                uniform_map[val] = uid
+                uid += 1
+        lbp_uniform = uniform_map[lbp]
+
+        # Spatial grid histograms
+        all_hists = []
+        grid = 3
+        cell_h, cell_w = h // grid, w // grid
+        for row in range(grid):
+            for col in range(grid):
+                y1, y2 = row * cell_h, (row + 1) * cell_h
+                x1, x2 = col * cell_w, (col + 1) * cell_w
+                cell = lbp_uniform[y1:y2, x1:x2]
+                hist = np.bincount(cell.ravel(), minlength=59).astype(np.float32)
+                total = hist.sum()
+                if total > 0:
+                    hist /= total
+                all_hists.append(hist)
+
+        features = np.concatenate(all_hists)  # 9 * 59 = 531 dims
+        norm = np.linalg.norm(features)
+        if norm > 0:
+            features /= norm
+        return features
+
+    def _texture_similarity(self, crop_rgb):
+        """Compare crop's LBP texture to Brownie's reference."""
+        feat = self.compute_lbp_features(crop_rgb)
+        if self._gallery_texture is not None:
+            sims = self._gallery_texture @ feat
+            return float(np.max(sims))
+        if self._texture_reference is not None:
+            return float(np.dot(feat, self._texture_reference))
+        return 0.0
+
+    # --- Body proportion features ---
+
+    @staticmethod
+    def compute_shape_features(crop_rgb):
+        """Compute body proportion features from contour analysis.
+
+        Extracts: aspect ratio, solidity, extent, compactness, hu moments.
+        Returns a 10-dim normalized feature vector.
+        """
+        img = cv2.resize(crop_rgb, (96, 96))
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Adaptive threshold to find cat silhouette
+        thresh = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 15, 5
+        )
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return np.zeros(10, dtype=np.float32)
+
+        # Use largest contour
+        cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        if area < 100:
+            return np.zeros(10, dtype=np.float32)
+
+        perimeter = cv2.arcLength(cnt, True)
+        x, y, w, h = cv2.boundingRect(cnt)
+        hull = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+
+        aspect_ratio = float(w) / max(h, 1)
+        extent = area / max(w * h, 1)
+        solidity = area / max(hull_area, 1)
+        compactness = (perimeter ** 2) / max(area, 1) / (4 * np.pi)  # 1.0 = circle
+
+        # Hu moments (log-transformed, first 6)
+        moments = cv2.moments(cnt)
+        hu = cv2.HuMoments(moments).flatten()[:6]
+        hu = np.array([-np.sign(h) * np.log10(max(abs(h), 1e-10)) for h in hu], dtype=np.float32)
+
+        features = np.array([aspect_ratio, extent, solidity, compactness], dtype=np.float32)
+        features = np.concatenate([features, hu])  # 4 + 6 = 10 dims
+        norm = np.linalg.norm(features)
+        if norm > 0:
+            features /= norm
+        return features
+
+    def _shape_similarity(self, crop_rgb):
+        """Compare crop's shape to Brownie's reference."""
+        feat = self.compute_shape_features(crop_rgb)
+        if self._gallery_shape is not None:
+            sims = self._gallery_shape @ feat
+            return float(np.max(sims))
+        if self._shape_reference is not None:
+            return float(np.dot(feat, self._shape_reference))
+        return 0.0
+
+    # --- Edge density features ---
+
+    @staticmethod
+    def compute_edge_features(crop_rgb):
+        """Compute edge density per spatial region for fur pattern complexity.
+
+        Uses Canny edge detection on a 3x3 grid, plus overall edge statistics.
+        Returns a 12-dim feature vector (9 regional densities + 3 global stats).
+        """
+        img = cv2.resize(crop_rgb, (96, 96))
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+
+        features = []
+        grid = 3
+        cell_h, cell_w = 96 // grid, 96 // grid
+        for row in range(grid):
+            for col in range(grid):
+                y1, y2 = row * cell_h, (row + 1) * cell_h
+                x1, x2 = col * cell_w, (col + 1) * cell_w
+                cell = edges[y1:y2, x1:x2]
+                density = np.count_nonzero(cell) / max(cell.size, 1)
+                features.append(density)
+
+        # Global edge statistics
+        total_density = np.count_nonzero(edges) / max(edges.size, 1)
+        # Edge orientation histogram (2 bins: horizontal vs vertical dominance)
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        h_energy = float(np.mean(np.abs(gx)))
+        v_energy = float(np.mean(np.abs(gy)))
+        total_energy = max(h_energy + v_energy, 1e-6)
+        features.extend([total_density, h_energy / total_energy, v_energy / total_energy])
+
+        features = np.array(features, dtype=np.float32)  # 12 dims
+        norm = np.linalg.norm(features)
+        if norm > 0:
+            features /= norm
+        return features
+
+    def _edge_similarity(self, crop_rgb):
+        """Compare crop's edge density to Brownie's reference."""
+        feat = self.compute_edge_features(crop_rgb)
+        if self._gallery_edge is not None:
+            sims = self._gallery_edge @ feat
+            return float(np.max(sims))
+        if self._edge_reference is not None:
+            return float(np.dot(feat, self._edge_reference))
+        return 0.0
+
     # --- Center crop to reduce background noise ---
 
     @staticmethod
@@ -527,16 +750,27 @@ class BrownieIdentifier:
                 if self.reference_embedding is not None or self._gallery_embeddings is not None:
                     emb_sim = self._gallery_emb_similarity(embedding)
                     color_sim = self._gallery_color_similarity(cropped)
-                    # Embedding is the primary discriminator; color is logged but not used in scoring
-                    combined = emb_sim
+                    # Compute additional feature similarities
+                    tex_sim = self._texture_similarity(cropped)
+                    shape_sim = self._shape_similarity(cropped)
+                    edge_sim = self._edge_similarity(cropped)
+                    # Weighted blend: embedding primary, texture secondary, others supplementary
+                    has_aux = (self._texture_reference is not None or self._gallery_texture is not None)
+                    if has_aux:
+                        combined = 0.50 * emb_sim + 0.25 * tex_sim + 0.15 * edge_sim + 0.10 * shape_sim
+                    else:
+                        combined = emb_sim
                     self.cache_result(track_id, combined >= self.similarity_threshold, combined)
                     # Debug output
                     if track_id in self._cache:
                         _, scores, _ = self._cache[track_id]
                         avg = sum(scores) / len(scores)
                         cached_result = self._cache[track_id][0]
+                        aux_str = ""
+                        if has_aux:
+                            aux_str = f", tex={tex_sim:.3f}, edge={edge_sim:.3f}, shape={shape_sim:.3f}"
                         color_str = f", color={color_sim:.3f}" if self._color_reference is not None else ""
-                        print(f"Brownie check [{self.backend}]: track={track_id}, emb={emb_sim:.3f}{color_str}, combined={combined:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
+                        print(f"Brownie check [{self.backend}]: track={track_id}, emb={emb_sim:.3f}{color_str}{aux_str}, combined={combined:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
             except Exception as e:
                 print(f"Brownie {self.backend} error: {e}", file=sys.stderr)
 
