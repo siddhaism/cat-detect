@@ -527,11 +527,8 @@ class BrownieIdentifier:
                 if self.reference_embedding is not None or self._gallery_embeddings is not None:
                     emb_sim = self._gallery_emb_similarity(embedding)
                     color_sim = self._gallery_color_similarity(cropped)
-                    # Blend both signals: embedding is the stronger discriminator
-                    if self._color_reference is not None or self._gallery_colors is not None:
-                        combined = 0.4 * color_sim + 0.6 * emb_sim
-                    else:
-                        combined = emb_sim
+                    # Embedding is the primary discriminator; color is logged but not used in scoring
+                    combined = emb_sim
                     self.cache_result(track_id, combined >= self.similarity_threshold, combined)
                     # Debug output
                     if track_id in self._cache:
