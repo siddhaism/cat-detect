@@ -67,8 +67,8 @@ BROWNIE_EMBEDDING = os.environ.get(
     "BROWNIE_EMBEDDING",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
 )
-BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.85"))
-BROWNIE_MIN_CONFIDENCE = float(os.environ.get("BROWNIE_MIN_CONFIDENCE", "0.30"))
+BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.75"))
+BROWNIE_MIN_CONFIDENCE = float(os.environ.get("BROWNIE_MIN_CONFIDENCE", "0.40"))
 DISABLE_BROWNIE = _env_bool("DISABLE_BROWNIE")
 
 BROWNIE_BACKEND = os.environ.get("BROWNIE_BACKEND", "hailo")  # hailo -> dnn -> simple
