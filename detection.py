@@ -226,10 +226,8 @@ def app_callback(pad, info, user_data):
             track_id = track[0].get_id() if track else None
             if track_id is None:
                 continue
-            # Skip low-confidence detections — crops are too noisy for ID
-            if detection.get_confidence() < BROWNIE_MIN_CONFIDENCE:
-                continue
-            if brownie_id.should_check(track_id):
+            # Submit new crops only for high-confidence detections
+            if detection.get_confidence() >= BROWNIE_MIN_CONFIDENCE and brownie_id.should_check(track_id):
                 try:
                     bbox = detection.get_bbox()
                     x1 = max(0, int(bbox.xmin() * width))
@@ -250,7 +248,8 @@ def app_callback(pad, info, user_data):
                         brownie_id.submit_async(track_id, crop)
                 except Exception as e:
                     print(f"Brownie ID error: {e}", file=sys.stderr)
-            elif brownie_id.get_cached_result(track_id):
+            # Always relabel if cached as Brownie (every frame, regardless of confidence)
+            if brownie_id.get_cached_result(track_id):
                 _relabel_detection(roi, detection, "Brownie")
 
     # Tracking and MQTT
