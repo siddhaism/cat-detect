@@ -37,7 +37,7 @@ class BrownieIdentifier:
         embedding_path,
         model_path=None,
         backend="hailo",
-        similarity_threshold=0.75,
+        similarity_threshold=0.80,
     ):
         self.similarity_threshold = similarity_threshold
         self.backend = backend
