@@ -38,8 +38,10 @@ class BrownieIdentifier:
         model_path=None,
         backend="hailo",
         similarity_threshold=0.55,
+        negative_threshold=-0.10,
     ):
         self.similarity_threshold = similarity_threshold
+        self.negative_threshold = negative_threshold
         self.backend = backend
         self.model_path = model_path
 
@@ -762,9 +764,11 @@ class BrownieIdentifier:
                         neg_sim = float(np.dot(embedding, self._negative_embedding))
                         # Margin = how much closer to Brownie than to non-Brownie
                         combined = emb_sim - neg_sim
+                        threshold = self.negative_threshold
                     else:
                         combined = emb_sim
-                    self.cache_result(track_id, combined >= self.similarity_threshold, combined)
+                        threshold = self.similarity_threshold
+                    self.cache_result(track_id, combined >= threshold, combined, threshold)
                     # Debug output
                     if track_id in self._cache:
                         _, scores, _ = self._cache[track_id]
@@ -837,9 +841,11 @@ class BrownieIdentifier:
             return False  # Max checks reached
         return (time.time() - ts) > 1.0
 
-    def cache_result(self, tracking_id, is_brownie, similarity=0.0):
+    def cache_result(self, tracking_id, is_brownie, similarity=0.0, threshold=None):
         """Cache identification result. Decision based on median of all scores.
         Median is more robust to outlier scores than mean."""
+        if threshold is None:
+            threshold = self.similarity_threshold
         if len(self._cache) > self._max_cache:
             oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][2])
             for k in oldest:
@@ -850,12 +856,12 @@ class BrownieIdentifier:
         else:
             scores = [similarity]
         median_sim = float(np.median(scores))
-        high_conf_threshold = self.similarity_threshold + 0.15
+        high_conf_threshold = threshold + 0.15
         # Accept on first check if score is very high, otherwise require 3+ checks
         if median_sim >= high_conf_threshold:
             is_brownie = True
         else:
-            is_brownie = median_sim >= self.similarity_threshold and len(scores) >= 3
+            is_brownie = median_sim >= threshold and len(scores) >= 3
         self._cache[tracking_id] = (is_brownie, scores, time.time())
 
     def get_cached_result(self, tracking_id):

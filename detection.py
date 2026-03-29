@@ -68,6 +68,7 @@ BROWNIE_EMBEDDING = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "brownie_embedding.npy"),
 )
 BROWNIE_THRESHOLD = float(os.environ.get("BROWNIE_THRESHOLD", "0.55"))
+BROWNIE_NEGATIVE_THRESHOLD = float(os.environ.get("BROWNIE_NEGATIVE_THRESHOLD", "-0.10"))
 BROWNIE_MIN_CONFIDENCE = float(os.environ.get("BROWNIE_MIN_CONFIDENCE", "0.40"))
 DISABLE_BROWNIE = _env_bool("DISABLE_BROWNIE")
 
@@ -81,6 +82,7 @@ if not DISABLE_BROWNIE:
                 embedding_path=BROWNIE_EMBEDDING,
                 backend=BROWNIE_BACKEND,
                 similarity_threshold=BROWNIE_THRESHOLD,
+                negative_threshold=BROWNIE_NEGATIVE_THRESHOLD,
             )
             if brownie_id.reference_embedding is not None:
                 print(f"\n{'='*60}", file=sys.stderr)
