@@ -208,6 +208,56 @@ def _detect_motion(frame):
     return False
 
 
+def _draw_detections(buffer, width, height):
+    """Draw colored bounding boxes directly onto the buffer.
+    GREEN (0,255,0) for Brownie, RED (255,0,0) for other cats."""
+    roi = hailo.get_roi_from_buffer(buffer)
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    if not detections:
+        return
+
+    success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
+    if not success:
+        return
+    try:
+        channels = 3
+        expected_size = height * width * channels
+        if len(map_info.data) < expected_size:
+            return
+        frame = np.ndarray(
+            shape=(height, width, channels),
+            dtype=np.uint8,
+            buffer=map_info.data,
+        )
+        for detection in detections:
+            label = detection.get_label()
+            confidence = detection.get_confidence()
+            bbox = detection.get_bbox()
+            x1 = max(0, int(bbox.xmin() * width))
+            y1 = max(0, int(bbox.ymin() * height))
+            x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+            y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+
+            # GREEN for Brownie, RED for cat (RGB order)
+            if label == "Brownie":
+                color = (0, 255, 0)
+            else:
+                color = (255, 0, 0)
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
+            text = f"{label} {confidence:.0%}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 1.2
+            thickness = 3
+            (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+            # Background rectangle for text readability
+            cv2.rectangle(frame, (x1, y1 - th - baseline - 6), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3), font, font_scale, (0, 0, 0), thickness + 1)
+            cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3), font, font_scale, (255, 255, 255), thickness)
+    finally:
+        buffer.unmap(map_info)
+
+
 # -----------------------------------------------------------------------------------------------
 # Main callback
 # -----------------------------------------------------------------------------------------------
@@ -338,6 +388,10 @@ def app_callback(pad, info, user_data):
                     print(f"Message published: {response}")
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
+
+    # Draw colored bounding boxes (replaces hailooverlay)
+    if width and height:
+        _draw_detections(buffer, width, height)
 
     return Gst.PadProbeReturn.OK
 

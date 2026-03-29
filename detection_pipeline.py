@@ -101,8 +101,6 @@ class GStreamerDetectionApp(GStreamerApp):
             + "queue name=queue_user_callback leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "identity name=identity_callback signal-handoffs=true ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
-            + "hailooverlay qos=false line-thickness=4 font-thickness=4 ! "
-            + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "videoconvert n-threads=2 qos=false ! "
             + "shmsink socket-path=/tmp/infered.feed sync=false wait-for-connection=false"
         )
