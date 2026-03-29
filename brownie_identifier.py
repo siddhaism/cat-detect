@@ -52,7 +52,7 @@ class BrownieIdentifier:
         self._ema_alpha = 0.45
         self._promote_margin = 0.03
         self._demote_margin = 0.07
-        self._streak_confirm = 3
+        self._streak_confirm = 2
         self._force_negative_streak = 3
 
         # Gallery of individual reference embeddings (for max-similarity matching)
@@ -895,7 +895,7 @@ class BrownieIdentifier:
                 )
             else:
                 is_brownie = (
-                    len(scores) >= 4 and
+                    len(scores) >= 3 and
                     pos_streak >= self._streak_confirm and
                     similarity > threshold and
                     ema > threshold and
