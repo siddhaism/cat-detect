@@ -12,6 +12,7 @@ import json
 from collections import OrderedDict
 
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import get_caps_from_pad, get_numpy_from_buffer
+import detection_pipeline
 from detection_pipeline import GStreamerDetectionApp, app_callback_class
 
 # Make AWS optional for local runs
@@ -338,6 +339,18 @@ def app_callback(pad, info, user_data):
                     print(f"Message published: {response}")
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
+
+    # Pass detection boxes to the color overlay element for drawing
+    if width and height:
+        dets = []
+        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
+            bbox = detection.get_bbox()
+            x1 = max(0, int(bbox.xmin() * width))
+            y1 = max(0, int(bbox.ymin() * height))
+            x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+            y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+            dets.append((detection.get_label(), x1, y1, x2, y2, detection.get_confidence()))
+        detection_pipeline.overlay_detections = dets
 
     return Gst.PadProbeReturn.OK
 
