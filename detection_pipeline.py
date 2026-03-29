@@ -6,6 +6,8 @@ import sys
 import setproctitle
 import hailo
 
+import color_overlay  # noqa: F401 — registers the 'coloroverlay' GStreamer element
+
 from hailo_apps.hailo_app_python.core.common.installation_utils import detect_hailo_arch
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
@@ -101,7 +103,7 @@ class GStreamerDetectionApp(GStreamerApp):
             + "queue name=queue_user_callback leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "identity name=identity_callback signal-handoffs=true ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
-            + "hailooverlay qos=false line-thickness=4 font-thickness=4 ! "
+            + "coloroverlay ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "videoconvert n-threads=2 qos=false ! "
             + "shmsink socket-path=/tmp/infered.feed sync=false wait-for-connection=false"
