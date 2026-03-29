@@ -52,7 +52,7 @@ class BrownieIdentifier:
         self._ema_alpha = 0.45
         self._promote_margin = 0.03
         self._demote_margin = 0.07
-        self._streak_confirm = 2
+        self._streak_confirm = 3
         self._force_negative_streak = 3
 
         # Gallery of individual reference embeddings (for max-similarity matching)
@@ -725,7 +725,7 @@ class BrownieIdentifier:
         }
 
     def inherit_nearby_brownie(self, track_id, cx, cy):
-        """Seed a nearby new track as a Brownie candidate, not a confirmed match."""
+        """Record nearby-track context without biasing the score history."""
         if track_id in self._cache:
             return False  # Already has its own result
         now = time.time()
@@ -736,11 +736,8 @@ class BrownieIdentifier:
                 continue
             dist = ((cx - bx) ** 2 + (cy - by) ** 2) ** 0.5
             if dist < self._spatial_threshold:
-                inherited_score = self.similarity_threshold + 0.02
-                self._cache[track_id] = (False, [inherited_score], now)
-                self._smooth_state[track_id] = (inherited_score, 1, 0)
                 print(
-                    f"Brownie candidate inherited: track={track_id} from track={tid} (dist={dist:.3f})",
+                    f"Brownie nearby-track hint: track={track_id} near track={tid} (dist={dist:.3f})",
                     file=sys.stderr,
                 )
                 return True
@@ -859,6 +856,7 @@ class BrownieIdentifier:
         """Cache identification result with temporal smoothing and hysteresis."""
         if threshold is None:
             threshold = self.similarity_threshold
+        using_negative_margin = self._negative_embedding is not None
         if len(self._cache) > self._max_cache:
             oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][2])
             for k in oldest:
@@ -888,7 +886,22 @@ class BrownieIdentifier:
             pos_streak = 0
             neg_streak = 0
 
-        if similarity >= high_conf_threshold or median_sim >= high_conf_threshold:
+        if using_negative_margin:
+            if prev_is_brownie:
+                is_brownie = not (
+                    neg_streak >= self._streak_confirm and
+                    ema <= threshold and
+                    median_sim <= threshold
+                )
+            else:
+                is_brownie = (
+                    len(scores) >= 4 and
+                    pos_streak >= self._streak_confirm and
+                    similarity > threshold and
+                    ema > threshold and
+                    median_sim > threshold
+                )
+        elif similarity >= high_conf_threshold or median_sim >= high_conf_threshold:
             is_brownie = True
         elif prev_is_brownie:
             is_brownie = not (
