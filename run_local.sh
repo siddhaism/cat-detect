@@ -115,8 +115,12 @@ pkill -f "producer-camera" 2>/dev/null || true
 pkill -f "consumer-infered" 2>/dev/null || true
 pkill -f "stream-to-mediamtx" 2>/dev/null || true
 pkill -f "detection.py" 2>/dev/null || true
+# Also kill orphaned gst-launch processes (from producer/consumer scripts)
+pkill -f "gst-launch.*libcamerasrc" 2>/dev/null || true
+pkill -f "gst-launch.*shmsrc" 2>/dev/null || true
+pkill -f "Hailo Detection App" 2>/dev/null || true
 # Give processes a moment to exit before removing sockets
-sleep 1
+sleep 2
 rm -f /tmp/feed.raw /tmp/infered.feed
 
 P_MEDIAMTX=""

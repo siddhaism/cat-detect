@@ -1,6 +1,6 @@
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib, GObject
+from gi.repository import Gst, GLib
 import os
 import sys
 import numpy as np
@@ -17,103 +17,60 @@ from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
 )
 
 # Shared detection state: written by app_callback in detection.py,
-# read by ColorOverlay.do_transform_ip. List of (label, x1, y1, x2, y2, conf).
-# Atomic replacement under CPython GIL — no lock needed.
+# read by the overlay pad probe. List of (label, x1, y1, x2, y2, conf).
 overlay_detections = []
 
-# -----------------------------------------------------------------------------------------------
-# Custom color overlay element (registered lazily after Gst.init)
-# GstBaseTransform gets writable buffers natively.
-# Reads detection boxes from the shared overlay_detections list
-# (avoids accessing hailo ROI metadata from the transform context).
-# -----------------------------------------------------------------------------------------------
 
-_overlay_registered = False
+def _overlay_probe(pad, info):
+    """Pad probe on shmsink's sink pad — draw colored bounding boxes.
+    At the terminal element, the buffer often has refcount 1 (writable)."""
+    buffer = info.get_buffer()
+    if buffer is None:
+        return Gst.PadProbeReturn.OK
 
+    dets = overlay_detections
+    if not dets:
+        return Gst.PadProbeReturn.OK
 
-def _ensure_overlay_registered():
-    global _overlay_registered
-    if _overlay_registered:
-        return
-    _overlay_registered = True
+    caps = pad.get_current_caps()
+    if caps is None:
+        return Gst.PadProbeReturn.OK
+    struct = caps.get_structure(0)
+    width = struct.get_value("width")
+    height = struct.get_value("height")
+    if not width or not height:
+        return Gst.PadProbeReturn.OK
 
-    gi.require_version('GstBase', '1.0')
-    from gi.repository import GstBase
+    success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
+    if not success:
+        return Gst.PadProbeReturn.OK
 
-    class ColorOverlay(GstBase.BaseTransform):
-        __gstmetadata__ = (
-            'ColorOverlay',
-            'Filter/Effect/Video',
-            'Draw colored detection boxes (green=Brownie, red=cat)',
-            'cat-detect',
+    try:
+        frame = np.ndarray(
+            shape=(height, width, 3),
+            dtype=np.uint8,
+            buffer=map_info.data,
         )
-        __gsttemplates__ = (
-            Gst.PadTemplate.new(
-                "sink", Gst.PadDirection.SINK, Gst.PadPresence.ALWAYS,
-                Gst.Caps.from_string("video/x-raw"),
-            ),
-            Gst.PadTemplate.new(
-                "src", Gst.PadDirection.SRC, Gst.PadPresence.ALWAYS,
-                Gst.Caps.from_string("video/x-raw"),
-            ),
-        )
+        for (label, x1, y1, x2, y2, conf) in dets:
+            color = (0, 255, 0) if label == "Brownie" else (255, 0, 0)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
+            text = f"{label} {conf:.0%}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 1.2
+            thickness = 3
+            (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+            cv2.rectangle(frame, (x1, y1 - th - baseline - 6),
+                          (x1 + tw + 4, y1), color, -1)
+            cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3),
+                        font, font_scale, (0, 0, 0), thickness + 1)
+            cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3),
+                        font, font_scale, (255, 255, 255), thickness)
+    except Exception as e:
+        print(f"Overlay draw error: {e}", file=sys.stderr)
+    finally:
+        buffer.unmap(map_info)
 
-        def __init__(self):
-            super().__init__()
-            self.width = 0
-            self.height = 0
-            self.set_in_place(True)
-            self.set_passthrough(False)
-
-        def do_set_caps(self, incaps, outcaps):
-            s = incaps.get_structure(0)
-            self.width = s.get_value("width")
-            self.height = s.get_value("height")
-            return True
-
-        def do_transform_ip(self, buffer):
-            if self.width == 0 or self.height == 0:
-                return Gst.FlowReturn.OK
-
-            dets = overlay_detections
-            if not dets:
-                return Gst.FlowReturn.OK
-
-            success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
-            if not success:
-                return Gst.FlowReturn.OK
-
-            try:
-                frame = np.ndarray(
-                    shape=(self.height, self.width, 3),
-                    dtype=np.uint8,
-                    buffer=map_info.data,
-                )
-                for (label, x1, y1, x2, y2, conf) in dets:
-                    color = (0, 255, 0) if label == "Brownie" else (255, 0, 0)
-
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
-
-                    text = f"{label} {conf:.0%}"
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 1.2
-                    thickness = 3
-                    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-                    cv2.rectangle(frame, (x1, y1 - th - baseline - 6),
-                                  (x1 + tw + 4, y1), color, -1)
-                    cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3),
-                                font, font_scale, (0, 0, 0), thickness + 1)
-                    cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3),
-                                font, font_scale, (255, 255, 255), thickness)
-            except Exception as e:
-                print(f"ColorOverlay draw error: {e}", file=sys.stderr)
-            finally:
-                buffer.unmap(map_info)
-
-            return Gst.FlowReturn.OK
-
-    GObject.type_register(ColorOverlay)
-    Gst.Element.register(None, "coloroverlay", Gst.Rank.NONE, ColorOverlay)
+    return Gst.PadProbeReturn.OK
 
 
 # -----------------------------------------------------------------------------------------------
@@ -130,11 +87,8 @@ class GStreamerDetectionApp(GStreamerApp):
             default=None,
             help="Path to custom labels JSON file",
         )
-        # Call the parent class constructor (calls Gst.init() internally)
+        # Call the parent class constructor (pass parser, it calls parse_args internally)
         super().__init__(parser, user_data)
-
-        # Register custom overlay element AFTER Gst.init() but BEFORE create_pipeline()
-        _ensure_overlay_registered()
 
         # Set Hailo parameters based on the model used
         self.batch_size = 1
@@ -183,6 +137,15 @@ class GStreamerDetectionApp(GStreamerApp):
 
         self.create_pipeline()
 
+        # Attach overlay probe on the shmsink's sink pad.
+        # At the terminal element, the buffer is likely writable (refcount 1).
+        sink = self.pipeline.get_by_name("output_sink")
+        if sink:
+            pad = sink.get_static_pad("sink")
+            if pad:
+                pad.add_probe(Gst.PadProbeType.BUFFER, _overlay_probe)
+                print("Color overlay probe attached to shmsink", file=sys.stderr)
+
     def get_pipeline_string(self):
         pipeline = (
             "shmsrc socket-path=/tmp/feed.raw do-timestamp=true is-live=true ! "
@@ -205,10 +168,8 @@ class GStreamerDetectionApp(GStreamerApp):
             + "queue name=queue_user_callback leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "identity name=identity_callback signal-handoffs=true ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
-            + "coloroverlay ! "
-            + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "videoconvert n-threads=2 qos=false ! "
-            + "shmsink socket-path=/tmp/infered.feed sync=false wait-for-connection=false"
+            + "shmsink socket-path=/tmp/infered.feed sync=false wait-for-connection=false name=output_sink"
         )
         print(pipeline, file=sys.stderr)
         return pipeline
