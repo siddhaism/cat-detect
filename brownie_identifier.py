@@ -53,6 +53,7 @@ class BrownieIdentifier:
         self._promote_margin = 0.03
         self._demote_margin = 0.07
         self._streak_confirm = 2
+        self._force_negative_streak = 3
 
         # Gallery of individual reference embeddings (for max-similarity matching)
         self._gallery_embeddings = None
@@ -724,7 +725,7 @@ class BrownieIdentifier:
         }
 
     def inherit_nearby_brownie(self, track_id, cx, cy):
-        """Check if a new track is near a recent Brownie and inherit identification."""
+        """Seed a nearby new track as a Brownie candidate, not a confirmed match."""
         if track_id in self._cache:
             return False  # Already has its own result
         now = time.time()
@@ -735,10 +736,13 @@ class BrownieIdentifier:
                 continue
             dist = ((cx - bx) ** 2 + (cy - by) ** 2) ** 0.5
             if dist < self._spatial_threshold:
-                # Inherit: seed cache as Brownie
-                self._cache[track_id] = (True, [self.similarity_threshold + 0.05], now)
-                self._smooth_state[track_id] = (self.similarity_threshold + 0.05, self._streak_confirm, 0)
-                print(f"Brownie inherited: track={track_id} from track={tid} (dist={dist:.3f})", file=sys.stderr)
+                inherited_score = self.similarity_threshold + 0.02
+                self._cache[track_id] = (False, [inherited_score], now)
+                self._smooth_state[track_id] = (inherited_score, 1, 0)
+                print(
+                    f"Brownie candidate inherited: track={track_id} from track={tid} (dist={dist:.3f})",
+                    file=sys.stderr,
+                )
                 return True
         return False
 
@@ -899,6 +903,14 @@ class BrownieIdentifier:
                 ema >= promote_threshold and
                 median_sim >= threshold
             )
+
+        recent_scores = scores[-self._force_negative_streak:]
+        if (
+            len(recent_scores) == self._force_negative_streak and
+            all(score <= threshold for score in recent_scores) and
+            median_sim <= threshold
+        ):
+            is_brownie = False
 
         self._cache[tracking_id] = (is_brownie, scores, time.time())
         self._smooth_state[tracking_id] = (ema, pos_streak, neg_streak)
