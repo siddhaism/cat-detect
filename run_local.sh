@@ -102,6 +102,23 @@ else
   echo "Warning: hailo_apps site-packages not found at $HAILO_EXAMPLES_SITE" >&2
 fi
 
+HEF_BASENAME="$(basename "$HEF_PATH")"
+DEVICE_ARCH_UPPER="${DEVICE_ARCHITECTURE:-}"
+case "$DEVICE_ARCH_UPPER" in
+  HAILO8)
+    if [[ "$HEF_BASENAME" == *h8l* ]]; then
+      echo "Error: device architecture is $DEVICE_ARCHITECTURE but HEF appears to target Hailo-8L: $HEF_PATH" >&2
+      echo "Use a Hailo-8 model such as yolov8m.hef or another non-h8l HEF." >&2
+      exit 1
+    fi
+    ;;
+  HAILO8L)
+    if [[ "$HEF_BASENAME" != *h8l* ]]; then
+      echo "Warning: device architecture is $DEVICE_ARCHITECTURE but HEF path does not look like an h8l build: $HEF_PATH" >&2
+    fi
+    ;;
+esac
+
 # Post-process .so files should be in the repo root
 for so in libyolo_hailortpp_postprocess.so libwhole_buffer.so; do
   if [[ ! -f "$ROOT_DIR/$so" ]]; then
@@ -158,7 +175,7 @@ fi
 
 # --- Start camera producer ---
 echo "Starting camera producer..."
-bash "$ROOT_DIR/producer-camera.sh" >/dev/null 2>&1 &
+bash "$ROOT_DIR/producer-camera.sh" >"$ROOT_DIR/.producer-camera.log" 2>&1 &
 P_PRODUCER=$!
 
 # Wait for camera shared memory to be ready
@@ -171,6 +188,10 @@ for i in $(seq 1 30); do
 done
 if [[ ! -e /tmp/feed.raw ]]; then
   echo "Error: /tmp/feed.raw not created after 30s. Camera producer may have failed." >&2
+  if [[ -f "$ROOT_DIR/.producer-camera.log" ]]; then
+    echo "--- producer-camera.sh log ---" >&2
+    tail -n 40 "$ROOT_DIR/.producer-camera.log" >&2 || true
+  fi
   exit 1
 fi
 

@@ -59,12 +59,25 @@ def _overlay_probe(pad, info):
             font_scale = 1.2
             thickness = 3
             (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-            cv2.rectangle(frame, (x1, y1 - th - baseline - 6),
-                          (x1 + tw + 4, y1), color, -1)
-            cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3),
-                        font, font_scale, (0, 0, 0), thickness + 1)
-            cv2.putText(frame, text, (x1 + 2, y1 - baseline - 3),
-                        font, font_scale, (255, 255, 255), thickness)
+            text_x = max(2, x1 + 4)
+            text_y = y1 - baseline - 6
+            label_top = y1 - th - baseline - 12
+            if label_top < 0:
+                text_y = min(height - baseline - 2, y1 + th + baseline + 8)
+                label_top = max(0, y1 + 2)
+            label_bottom = min(height - 1, text_y + baseline + 6)
+            label_right = min(width - 1, text_x + tw + 6)
+            cv2.rectangle(
+                frame,
+                (max(0, text_x - 4), label_top),
+                (label_right, label_bottom),
+                (0, 0, 0),
+                -1,
+            )
+            cv2.putText(frame, text, (text_x, text_y),
+                        font, font_scale, (0, 0, 0), thickness + 2)
+            cv2.putText(frame, text, (text_x, text_y),
+                        font, font_scale, color, thickness)
     except Exception as e:
         print(f"Overlay draw error: {e}", file=sys.stderr)
     finally:
