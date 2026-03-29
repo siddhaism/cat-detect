@@ -45,3 +45,22 @@ Troubleshooting
 - Post-process `.so` not found: Point `detection_pipeline.py` to your TAPPAS libs or place them in the repo root.
 - No video: Verify the raw feed first with `consumer-raw-fpsdisplaysink.sh`; then check HEF and `.so` paths.
 
+Run As A Service
+- For headless startup on boot, this repo includes:
+  - `start_cat_detect.sh` — wrapper that sources `setup_env.sh`, sets `PYTHONPATH`, and runs `run_local.sh` in stream mode
+  - `cat-detect.service` — `systemd` unit file
+- On the Pi, make the wrapper executable:
+  - `chmod +x /home/pihole/repos/cat-detect/start_cat_detect.sh`
+- Install the service:
+  - `sudo cp /home/pihole/repos/cat-detect/cat-detect.service /etc/systemd/system/cat-detect.service`
+  - `sudo chmod 644 /etc/systemd/system/cat-detect.service`
+  - `sudo systemctl daemon-reload`
+  - `sudo systemctl enable cat-detect.service`
+  - `sudo systemctl start cat-detect.service`
+- View logs:
+  - `sudo journalctl -u cat-detect.service -f`
+- The service runs headless with:
+  - `--hef /usr/share/hailo-models/yolov8s_h8.hef`
+  - `--stream`
+  - `--no-viewer`
+- If your HEF path is different, edit `start_cat_detect.sh`.

@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 # Source the Hailo/TAPPAS environment exactly as run_local.sh expects.
+set +u
 source "$ROOT_DIR/setup_env.sh"
+set -u
 
 # Make hailo_apps available when launched outside an interactive shell.
 HAILO_EXAMPLES_SITE="$HOME/repos/hailo-rpi5-examples/venv_hailo_rpi_examples/lib/python3.11/site-packages"
