@@ -208,15 +208,24 @@ def _detect_motion(frame):
     return False
 
 
+import ctypes
+
+
 def _draw_detections(buffer, width, height):
     """Draw colored bounding boxes directly onto the buffer.
-    GREEN (0,255,0) for Brownie, RED (255,0,0) for other cats."""
+    GREEN (0,255,0) for Brownie, RED (255,0,0) for other cats.
+
+    Maps buffer as READ (which always succeeds in the probe) and writes
+    through the raw pointer via ctypes — the underlying shared memory
+    is writable even though GStreamer marks the buffer as non-writable
+    at the API level.
+    """
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     if not detections:
         return
 
-    success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
+    success, map_info = buffer.map(Gst.MapFlags.READ)
     if not success:
         return
     try:
@@ -224,10 +233,11 @@ def _draw_detections(buffer, width, height):
         expected_size = height * width * channels
         if len(map_info.data) < expected_size:
             return
-        frame = np.ndarray(
+        # Get writable numpy view via ctypes raw pointer
+        ptr = ctypes.addressof(ctypes.c_byte.from_buffer(map_info.data))
+        frame = np.ctypeslib.as_array(
+            ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8)),
             shape=(height, width, channels),
-            dtype=np.uint8,
-            buffer=map_info.data,
         )
         for detection in detections:
             label = detection.get_label()
