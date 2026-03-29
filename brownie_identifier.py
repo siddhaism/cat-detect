@@ -48,6 +48,11 @@ class BrownieIdentifier:
         # Tracking cache: tracking_id -> (is_brownie, scores_list, timestamp)
         self._cache = {}
         self._max_cache = 500
+        self._smooth_state = {}
+        self._ema_alpha = 0.45
+        self._promote_margin = 0.03
+        self._demote_margin = 0.07
+        self._streak_confirm = 2
 
         # Gallery of individual reference embeddings (for max-similarity matching)
         self._gallery_embeddings = None
@@ -732,6 +737,7 @@ class BrownieIdentifier:
             if dist < self._spatial_threshold:
                 # Inherit: seed cache as Brownie
                 self._cache[track_id] = (True, [self.similarity_threshold + 0.05], now)
+                self._smooth_state[track_id] = (self.similarity_threshold + 0.05, self._streak_confirm, 0)
                 print(f"Brownie inherited: track={track_id} from track={tid} (dist={dist:.3f})", file=sys.stderr)
                 return True
         return False
@@ -836,34 +842,66 @@ class BrownieIdentifier:
         if tracking_id not in self._cache:
             return True
         is_brownie, scores, ts = self._cache[tracking_id]
-        if is_brownie and len(scores) >= 3:
-            return False  # Confidently identified
-        if len(scores) >= 7:
-            return False  # Max checks reached
-        return (time.time() - ts) > 1.0
+        _, pos_streak, neg_streak = self._smooth_state.get(tracking_id, (0.0, 0, 0))
+        if is_brownie and len(scores) >= 4 and pos_streak >= self._streak_confirm:
+            return False
+        if (not is_brownie) and len(scores) >= 8 and neg_streak >= self._streak_confirm:
+            return False
+        if len(scores) >= 10:
+            return False
+        return (time.time() - ts) > 0.75
 
     def cache_result(self, tracking_id, is_brownie, similarity=0.0, threshold=None):
-        """Cache identification result. Decision based on median of all scores.
-        Median is more robust to outlier scores than mean."""
+        """Cache identification result with temporal smoothing and hysteresis."""
         if threshold is None:
             threshold = self.similarity_threshold
         if len(self._cache) > self._max_cache:
             oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][2])
             for k in oldest:
                 del self._cache[k]
+                self._smooth_state.pop(k, None)
+        prev_is_brownie = False
         if tracking_id in self._cache:
-            _, prev_scores, _ = self._cache[tracking_id]
+            prev_is_brownie, prev_scores, _ = self._cache[tracking_id]
             scores = prev_scores + [similarity]
         else:
             scores = [similarity]
         median_sim = float(np.median(scores))
         high_conf_threshold = threshold + 0.15
-        # Accept on first check if score is very high, otherwise require 3+ checks
-        if median_sim >= high_conf_threshold:
-            is_brownie = True
+        promote_threshold = threshold + self._promote_margin
+        demote_threshold = threshold - self._demote_margin
+
+        prev_ema, prev_pos, prev_neg = self._smooth_state.get(tracking_id, (similarity, 0, 0))
+        ema = (self._ema_alpha * similarity) + ((1.0 - self._ema_alpha) * prev_ema)
+
+        if similarity >= promote_threshold:
+            pos_streak = prev_pos + 1
+            neg_streak = 0
+        elif similarity <= demote_threshold:
+            neg_streak = prev_neg + 1
+            pos_streak = 0
         else:
-            is_brownie = median_sim >= threshold and len(scores) >= 3
+            pos_streak = 0
+            neg_streak = 0
+
+        if similarity >= high_conf_threshold or median_sim >= high_conf_threshold:
+            is_brownie = True
+        elif prev_is_brownie:
+            is_brownie = not (
+                neg_streak >= self._streak_confirm and
+                ema <= demote_threshold and
+                median_sim <= threshold
+            )
+        else:
+            is_brownie = (
+                len(scores) >= 3 and
+                pos_streak >= self._streak_confirm and
+                ema >= promote_threshold and
+                median_sim >= threshold
+            )
+
         self._cache[tracking_id] = (is_brownie, scores, time.time())
+        self._smooth_state[tracking_id] = (ema, pos_streak, neg_streak)
 
     def get_cached_result(self, tracking_id):
         """Get cached result for a tracking ID."""
