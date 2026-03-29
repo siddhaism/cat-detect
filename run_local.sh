@@ -109,6 +109,16 @@ for so in libyolo_hailortpp_postprocess.so libwhole_buffer.so; do
   fi
 done
 
+# --- Kill leftover processes and sockets from previous runs ---
+echo "Cleaning up previous instances..."
+pkill -f "producer-camera" 2>/dev/null || true
+pkill -f "consumer-infered" 2>/dev/null || true
+pkill -f "stream-to-mediamtx" 2>/dev/null || true
+pkill -f "detection.py" 2>/dev/null || true
+# Give processes a moment to exit before removing sockets
+sleep 1
+rm -f /tmp/feed.raw /tmp/infered.feed
+
 P_MEDIAMTX=""
 P_PRODUCER=""
 P_DETECT=""
