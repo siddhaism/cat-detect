@@ -1,0 +1,18 @@
+[Unit]
+Description=Cat Detect Pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pihole
+WorkingDirectory=/home/pihole/repos/cat-detect
+ExecStart=/home/pihole/repos/cat-detect/start_cat_detect.sh
+Restart=always
+RestartSec=5
+Environment=HOME=/home/pihole
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
