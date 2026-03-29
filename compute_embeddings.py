@@ -39,6 +39,11 @@ def main():
         choices=["hailo", "dnn", "simple"],
         help="Feature extraction backend (default: hailo)",
     )
+    parser.add_argument(
+        "--negative-dir",
+        default=None,
+        help="Directory with non-Brownie cat photos for relative scoring (optional)",
+    )
     args = parser.parse_args()
 
     from brownie_identifier import BrownieIdentifier
@@ -145,6 +150,35 @@ def main():
     _save_feature(BrownieIdentifier.compute_lbp_features, "texture")
     _save_feature(BrownieIdentifier.compute_shape_features, "shape")
     _save_feature(BrownieIdentifier.compute_edge_features, "edge")
+
+    # Compute negative (non-Brownie) reference if provided
+    if args.negative_dir:
+        neg_dir = Path(args.negative_dir)
+        if not neg_dir.exists():
+            print(f"Warning: negative directory {neg_dir} does not exist, skipping")
+        else:
+            neg_photos = [p for p in neg_dir.iterdir() if p.suffix.lower() in extensions]
+            if neg_photos:
+                neg_embeddings = []
+                for photo_path in sorted(neg_photos):
+                    img = cv2.imread(str(photo_path))
+                    if img is None:
+                        continue
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    emb = identifier.get_embedding(img_rgb)
+                    neg_embeddings.append(emb)
+                    print(f"  Negative: {photo_path.name}")
+                if neg_embeddings:
+                    avg_neg = np.mean(neg_embeddings, axis=0).astype(np.float32)
+                    norm = np.linalg.norm(avg_neg)
+                    if norm > 0:
+                        avg_neg /= norm
+                    neg_output = args.output.replace(".npy", "_negative.npy")
+                    np.save(neg_output, avg_neg)
+                    print(f"Saved negative reference to {neg_output} (from {len(neg_embeddings)} photos)")
+                    print(f"  At runtime, scoring uses: brownie_similarity - negative_similarity")
+            else:
+                print(f"No images found in {neg_dir}")
 
 
 if __name__ == "__main__":

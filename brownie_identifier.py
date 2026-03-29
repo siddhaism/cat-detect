@@ -57,8 +57,8 @@ class BrownieIdentifier:
         self._edge_reference = None  # Averaged edge density reference
         self._gallery_edge = None  # Edge density gallery
 
-        # Cross-track spatial persistence
-        self._brownie_positions = {}  # track_id -> (cx, cy, timestamp)
+        # Negative examples: embeddings of non-Brownie cats for relative scoring
+        self._negative_embedding = None
         self._spatial_threshold = 0.20  # 20% of frame dimension
         self._spatial_timeout = 3.0  # seconds
 
@@ -158,6 +158,16 @@ class BrownieIdentifier:
                 norms[norms == 0] = 1
                 self._gallery_edge = ge / norms
                 print(f"Loaded Brownie edge gallery: {self._gallery_edge.shape[0]} entries")
+
+            # Load negative (non-Brownie) reference if available
+            neg_path = embedding_path.replace(".npy", "_negative.npy")
+            if os.path.exists(neg_path):
+                self._negative_embedding = np.load(neg_path).astype(np.float32)
+                norm = np.linalg.norm(self._negative_embedding)
+                if norm > 0:
+                    self._negative_embedding /= norm
+                print(f"Loaded negative reference: shape={self._negative_embedding.shape}")
+                print(f"  Using relative scoring (brownie_sim - negative_sim)")
 
         # Initialize backend (with fallback chain: hailo -> dnn -> simple)
         if backend == "hailo":
@@ -677,10 +687,8 @@ class BrownieIdentifier:
     # --- Gallery matching ---
 
     def _gallery_emb_similarity(self, embedding):
-        """Max cosine similarity against all gallery embeddings."""
-        if self._gallery_embeddings is not None:
-            sims = self._gallery_embeddings @ embedding
-            return float(np.max(sims))
+        """Cosine similarity against the averaged reference embedding.
+        Gallery max was tried but inflated scores for non-Brownie cats."""
         if self.reference_embedding is not None:
             return float(np.dot(embedding, self.reference_embedding))
         return 0.0
@@ -749,15 +757,21 @@ class BrownieIdentifier:
                 embedding = self.get_embedding(cropped)
                 if self.reference_embedding is not None or self._gallery_embeddings is not None:
                     emb_sim = self._gallery_emb_similarity(embedding)
-                    # Embedding is the only discriminative signal for individual cat identity
-                    combined = emb_sim
+                    # Relative scoring: if we have negative examples, use the margin
+                    if self._negative_embedding is not None:
+                        neg_sim = float(np.dot(embedding, self._negative_embedding))
+                        # Margin = how much closer to Brownie than to non-Brownie
+                        combined = emb_sim - neg_sim
+                    else:
+                        combined = emb_sim
                     self.cache_result(track_id, combined >= self.similarity_threshold, combined)
                     # Debug output
                     if track_id in self._cache:
                         _, scores, _ = self._cache[track_id]
-                        avg = sum(scores) / len(scores)
+                        median = float(np.median(scores))
                         cached_result = self._cache[track_id][0]
-                        print(f"Brownie check [{self.backend}]: track={track_id}, emb={emb_sim:.3f}, avg={avg:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
+                        neg_str = f", neg={neg_sim:.3f}, margin={combined:.3f}" if self._negative_embedding is not None else ""
+                        print(f"Brownie check [{self.backend}]: track={track_id}, emb={emb_sim:.3f}{neg_str}, median={median:.3f} ({len(scores)}x), match={cached_result}", file=sys.stderr)
             except Exception as e:
                 print(f"Brownie {self.backend} error: {e}", file=sys.stderr)
 
@@ -824,8 +838,8 @@ class BrownieIdentifier:
         return (time.time() - ts) > 1.0
 
     def cache_result(self, tracking_id, is_brownie, similarity=0.0):
-        """Cache identification result. Decision based on average of all scores.
-        Strong matches (threshold + 0.10) are accepted on first check."""
+        """Cache identification result. Decision based on median of all scores.
+        Median is more robust to outlier scores than mean."""
         if len(self._cache) > self._max_cache:
             oldest = heapq.nsmallest(100, self._cache, key=lambda k: self._cache[k][2])
             for k in oldest:
@@ -835,13 +849,13 @@ class BrownieIdentifier:
             scores = prev_scores + [similarity]
         else:
             scores = [similarity]
-        avg_sim = sum(scores) / len(scores)
+        median_sim = float(np.median(scores))
         high_conf_threshold = self.similarity_threshold + 0.15
         # Accept on first check if score is very high, otherwise require 3+ checks
-        if avg_sim >= high_conf_threshold:
+        if median_sim >= high_conf_threshold:
             is_brownie = True
         else:
-            is_brownie = avg_sim >= self.similarity_threshold and len(scores) >= 3
+            is_brownie = median_sim >= self.similarity_threshold and len(scores) >= 3
         self._cache[tracking_id] = (is_brownie, scores, time.time())
 
     def get_cached_result(self, tracking_id):
