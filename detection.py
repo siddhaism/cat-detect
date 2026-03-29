@@ -119,6 +119,7 @@ BBOX_MIN_SIZE = int(os.environ.get("BBOX_MIN_SIZE", "40"))  # min px width/heigh
 BBOX_MIN_ASPECT = float(os.environ.get("BBOX_MIN_ASPECT", "0.3"))
 BBOX_MAX_ASPECT = float(os.environ.get("BBOX_MAX_ASPECT", "3.0"))
 BBOX_EDGE_MARGIN = int(os.environ.get("BBOX_EDGE_MARGIN", "5"))  # px from frame edge
+BBOX_MIN_BLUR = float(os.environ.get("BBOX_MIN_BLUR", "15.0"))  # variance of Laplacian
 
 # Borderline crop logging: set SAVE_BORDERLINE=1 to save near-threshold crops
 SAVE_BORDERLINE = _env_bool("SAVE_BORDERLINE")
@@ -178,6 +179,14 @@ def _is_good_crop(x1, y1, x2, y2, frame_w, frame_h):
             x2 >= frame_w - BBOX_EDGE_MARGIN or y2 >= frame_h - BBOX_EDGE_MARGIN):
         return False
     return True
+
+
+def _crop_has_detail(crop):
+    """Reject extremely blurry/flat crops before identity matching."""
+    if crop is None or crop.size == 0:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    return cv2.Laplacian(gray, cv2.CV_32F).var() >= BBOX_MIN_BLUR
 
 
 def _detect_motion(frame):
@@ -254,6 +263,13 @@ def app_callback(pad, info, user_data):
             if track_id is None:
                 continue
             bbox = detection.get_bbox()
+            cx = bbox.xmin() + (bbox.width() / 2.0)
+            cy = bbox.ymin() + (bbox.height() / 2.0)
+
+            # If the tracker drops and recreates a nearby track, inherit Brownie briefly.
+            if not brownie_id.get_cached_result(track_id):
+                brownie_id.inherit_nearby_brownie(track_id, cx, cy)
+
             # Submit new crops only for high-confidence detections
             if detection.get_confidence() >= BROWNIE_MIN_CONFIDENCE and brownie_id.should_check(track_id):
                 try:
@@ -263,6 +279,8 @@ def app_callback(pad, info, user_data):
                     y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
                     if x2 > x1 and y2 > y1 and _is_good_crop(x1, y1, x2, y2, width, height):
                         crop = frame[y1:y2, x1:x2].copy()
+                        if not _crop_has_detail(crop):
+                            continue
                         # Save crops when in capture mode
                         if SAVE_CROPS:
                             global _save_crop_count
@@ -277,6 +295,7 @@ def app_callback(pad, info, user_data):
                     print(f"Brownie ID error: {e}", file=sys.stderr)
             # Always relabel if cached as Brownie (every frame, regardless of confidence)
             if brownie_id.get_cached_result(track_id):
+                brownie_id.register_brownie_position(track_id, cx, cy)
                 _relabel_detection(roi, detection, "Brownie")
 
     # Save borderline crops for offline evaluation

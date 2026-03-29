@@ -63,6 +63,7 @@ class BrownieIdentifier:
         self._negative_embedding = None
         self._spatial_threshold = 0.20  # 20% of frame dimension
         self._spatial_timeout = 3.0  # seconds
+        self._brownie_positions = {}
 
         # DNN model (onnxruntime)
         self._ort_session = None
