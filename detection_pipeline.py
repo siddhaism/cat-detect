@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 import setproctitle
 import hailo
+import color_overlay  # Registers the custom coloroverlay Gst element.
 
 from hailo_apps.hailo_app_python.core.common.installation_utils import detect_hailo_arch
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
@@ -15,76 +16,6 @@ from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
     app_callback_class,
     dummy_callback,
 )
-
-# Shared detection state: written by app_callback in detection.py,
-# read by the overlay pad probe. List of (label, x1, y1, x2, y2, conf).
-overlay_detections = []
-
-
-def _overlay_probe(pad, info):
-    """Pad probe on shmsink's sink pad — draw colored bounding boxes.
-    At the terminal element, the buffer often has refcount 1 (writable)."""
-    buffer = info.get_buffer()
-    if buffer is None:
-        return Gst.PadProbeReturn.OK
-
-    dets = overlay_detections
-    if not dets:
-        return Gst.PadProbeReturn.OK
-
-    caps = pad.get_current_caps()
-    if caps is None:
-        return Gst.PadProbeReturn.OK
-    struct = caps.get_structure(0)
-    width = struct.get_value("width")
-    height = struct.get_value("height")
-    if not width or not height:
-        return Gst.PadProbeReturn.OK
-
-    success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
-    if not success:
-        return Gst.PadProbeReturn.OK
-
-    try:
-        frame = np.ndarray(
-            shape=(height, width, 3),
-            dtype=np.uint8,
-            buffer=map_info.data,
-        )
-        for (label, x1, y1, x2, y2, conf) in dets:
-            color = (0, 255, 0) if label == "Brownie" else (255, 0, 0)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
-            text = f"{label} {conf:.0%}"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 1.2
-            thickness = 3
-            (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-            text_x = max(2, x1 + 4)
-            text_y = y1 - baseline - 6
-            label_top = y1 - th - baseline - 12
-            if label_top < 0:
-                text_y = min(height - baseline - 2, y1 + th + baseline + 8)
-                label_top = max(0, y1 + 2)
-            label_bottom = min(height - 1, text_y + baseline + 6)
-            label_right = min(width - 1, text_x + tw + 6)
-            cv2.rectangle(
-                frame,
-                (max(0, text_x - 4), label_top),
-                (label_right, label_bottom),
-                (0, 0, 0),
-                -1,
-            )
-            cv2.putText(frame, text, (text_x, text_y),
-                        font, font_scale, (0, 0, 0), thickness + 2)
-            cv2.putText(frame, text, (text_x, text_y),
-                        font, font_scale, color, thickness)
-    except Exception as e:
-        print(f"Overlay draw error: {e}", file=sys.stderr)
-    finally:
-        buffer.unmap(map_info)
-
-    return Gst.PadProbeReturn.OK
-
 
 # -----------------------------------------------------------------------------------------------
 # User Gstreamer Application
@@ -150,15 +81,6 @@ class GStreamerDetectionApp(GStreamerApp):
 
         self.create_pipeline()
 
-        # Attach overlay probe on the shmsink's sink pad.
-        # At the terminal element, the buffer is likely writable (refcount 1).
-        sink = self.pipeline.get_by_name("output_sink")
-        if sink:
-            pad = sink.get_static_pad("sink")
-            if pad:
-                pad.add_probe(Gst.PadProbeType.BUFFER, _overlay_probe)
-                print("Color overlay probe attached to shmsink", file=sys.stderr)
-
     def get_pipeline_string(self):
         pipeline = (
             "shmsrc socket-path=/tmp/feed.raw do-timestamp=true is-live=true ! "
@@ -181,6 +103,7 @@ class GStreamerDetectionApp(GStreamerApp):
             + "queue name=queue_user_callback leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "identity name=identity_callback signal-handoffs=true ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
+            + "coloroverlay ! "
             + "videoconvert n-threads=2 qos=false ! "
             + "shmsink socket-path=/tmp/infered.feed sync=false wait-for-connection=false name=output_sink"
         )

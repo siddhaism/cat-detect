@@ -12,7 +12,6 @@ import json
 from collections import OrderedDict
 
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import get_caps_from_pad, get_numpy_from_buffer
-import detection_pipeline
 from detection_pipeline import GStreamerDetectionApp, app_callback_class
 
 # Make AWS optional for local runs
@@ -224,18 +223,12 @@ def app_callback(pad, info, user_data):
     # Map buffer for read access
     frame = None
     if format and width and height:
-        channels = 3
-        expected_size = height * width * channels
-        success, map_info = buffer.map(Gst.MapFlags.READ)
-        if success and len(map_info.data) >= expected_size:
-            frame = np.ndarray(
-                shape=(height, width, channels),
-                dtype=np.uint8,
-                buffer=map_info.data,
-            ).copy()
-            buffer.unmap(map_info)
-        elif success:
-            buffer.unmap(map_info)
+        try:
+            frame = get_numpy_from_buffer(buffer, format, width, height)
+            if frame is not None:
+                frame = frame.copy()
+        except Exception:
+            frame = None
 
     # Motion detection
     if ENABLE_MOTION and frame is not None:
@@ -339,18 +332,6 @@ def app_callback(pad, info, user_data):
                     print(f"Message published: {response}")
                 except Exception as e:
                     print(f"AWS publish failed (ignored): {e}")
-
-    # Pass detection boxes to the color overlay element for drawing
-    if width and height:
-        dets = []
-        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
-            bbox = detection.get_bbox()
-            x1 = max(0, int(bbox.xmin() * width))
-            y1 = max(0, int(bbox.ymin() * height))
-            x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
-            y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
-            dets.append((detection.get_label(), x1, y1, x2, y2, detection.get_confidence()))
-        detection_pipeline.overlay_detections = dets
 
     return Gst.PadProbeReturn.OK
 
