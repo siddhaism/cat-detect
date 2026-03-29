@@ -7,7 +7,6 @@ import numpy as np
 import cv2
 import setproctitle
 import hailo
-import color_overlay  # Registers the custom coloroverlay Gst element.
 
 from hailo_apps.hailo_app_python.core.common.installation_utils import detect_hailo_arch
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
@@ -103,7 +102,7 @@ class GStreamerDetectionApp(GStreamerApp):
             + "queue name=queue_user_callback leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
             + "identity name=identity_callback signal-handoffs=true ! "
             + "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "
-            + "coloroverlay ! "
+            + "hailooverlay qos=false line-thickness=4 font-thickness=4 ! "
             + "videoconvert n-threads=2 qos=false ! "
             + "shmsink socket-path=/tmp/infered.feed sync=false wait-for-connection=false name=output_sink"
         )
