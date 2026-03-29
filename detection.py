@@ -114,11 +114,27 @@ SAVE_CROPS = _env_bool("SAVE_CROPS")
 SAVE_CROPS_DIR = os.environ.get("SAVE_CROPS_DIR", os.path.expanduser("~/brownie_crops_live"))
 _save_crop_count = 0
 
+# Bbox quality gating: reject low-quality crops before identity checks
+BBOX_MIN_SIZE = int(os.environ.get("BBOX_MIN_SIZE", "40"))  # min px width/height
+BBOX_MIN_ASPECT = float(os.environ.get("BBOX_MIN_ASPECT", "0.3"))
+BBOX_MAX_ASPECT = float(os.environ.get("BBOX_MAX_ASPECT", "3.0"))
+BBOX_EDGE_MARGIN = int(os.environ.get("BBOX_EDGE_MARGIN", "5"))  # px from frame edge
+
+# Borderline crop logging: set SAVE_BORDERLINE=1 to save near-threshold crops
+SAVE_BORDERLINE = _env_bool("SAVE_BORDERLINE")
+SAVE_BORDERLINE_DIR = os.environ.get("SAVE_BORDERLINE_DIR", os.path.expanduser("~/brownie_borderline"))
+BORDERLINE_MARGIN = float(os.environ.get("BORDERLINE_MARGIN", "0.10"))
+_borderline_count = 0
+
 if SAVE_CROPS:
     os.makedirs(SAVE_CROPS_DIR, exist_ok=True)
     print(f"CROP SAVING ENABLED: saving cat crops to {SAVE_CROPS_DIR}")
     print(f"  Hold up Brownie's printout, then recompute with:")
     print(f"  python3 compute_embeddings.py --photos-dir {SAVE_CROPS_DIR} --backend hailo")
+
+if SAVE_BORDERLINE:
+    os.makedirs(SAVE_BORDERLINE_DIR, exist_ok=True)
+    print(f"BORDERLINE LOGGING ENABLED: saving near-threshold crops to {SAVE_BORDERLINE_DIR}")
 
 if ENABLE_MOTION:
     print(f"Motion detection enabled (threshold={MOTION_THRESHOLD}, min_area={MOTION_MIN_AREA}, cooldown={MOTION_COOLDOWN_SECS}s)")
@@ -147,6 +163,21 @@ def _relabel_detection(roi, detection, new_label):
         new_det.add_object(obj)
     roi.add_object(new_det)
     return new_det
+
+
+def _is_good_crop(x1, y1, x2, y2, frame_w, frame_h):
+    """Reject crops that are too small, extreme aspect ratio, or clipped at frame edge."""
+    w = x2 - x1
+    h = y2 - y1
+    if w < BBOX_MIN_SIZE or h < BBOX_MIN_SIZE:
+        return False
+    aspect = w / max(h, 1)
+    if aspect < BBOX_MIN_ASPECT or aspect > BBOX_MAX_ASPECT:
+        return False
+    if (x1 <= BBOX_EDGE_MARGIN or y1 <= BBOX_EDGE_MARGIN or
+            x2 >= frame_w - BBOX_EDGE_MARGIN or y2 >= frame_h - BBOX_EDGE_MARGIN):
+        return False
+    return True
 
 
 def _detect_motion(frame):
@@ -236,7 +267,7 @@ def app_callback(pad, info, user_data):
                     y1 = max(0, int(bbox.ymin() * height))
                     x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
                     y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
-                    if x2 > x1 and y2 > y1:
+                    if x2 > x1 and y2 > y1 and _is_good_crop(x1, y1, x2, y2, width, height):
                         crop = frame[y1:y2, x1:x2].copy()
                         # Save crops when in capture mode
                         if SAVE_CROPS:
@@ -253,6 +284,39 @@ def app_callback(pad, info, user_data):
             # Always relabel if cached as Brownie (every frame, regardless of confidence)
             if brownie_id.get_cached_result(track_id):
                 _relabel_detection(roi, detection, "Brownie")
+
+    # Save borderline crops for offline evaluation
+    if SAVE_BORDERLINE and brownie_id is not None and frame is not None:
+        for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):
+            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+            track_id = track[0].get_id() if track else None
+            if track_id is None:
+                continue
+            score_info = brownie_id.get_cached_score(track_id)
+            if score_info is not None:
+                median_score, threshold, is_brownie = score_info
+                distance_from_threshold = abs(median_score - threshold)
+                if distance_from_threshold <= BORDERLINE_MARGIN:
+                    try:
+                        global _borderline_count
+                        bbox = detection.get_bbox()
+                        bx1 = max(0, int(bbox.xmin() * width))
+                        by1 = max(0, int(bbox.ymin() * height))
+                        bx2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+                        by2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+                        if bx2 > bx1 and by2 > by1:
+                            bcrop = frame[by1:by2, bx1:bx2].copy()
+                            label_tag = "brownie" if is_brownie else "cat"
+                            fname = f"border_{_borderline_count:04d}_{label_tag}_m{median_score:+.3f}_t{threshold:+.3f}.jpg"
+                            cv2.imwrite(
+                                os.path.join(SAVE_BORDERLINE_DIR, fname),
+                                cv2.cvtColor(bcrop, cv2.COLOR_RGB2BGR),
+                            )
+                            _borderline_count += 1
+                            if _borderline_count % 5 == 0:
+                                print(f"Saved {_borderline_count} borderline crops to {SAVE_BORDERLINE_DIR}")
+                    except Exception:
+                        pass
 
     # Tracking and MQTT
     for detection in roi.get_objects_typed(hailo.HAILO_DETECTION):

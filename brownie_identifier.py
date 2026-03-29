@@ -869,3 +869,15 @@ class BrownieIdentifier:
         if tracking_id in self._cache:
             return self._cache[tracking_id][0]
         return False
+
+    def get_cached_score(self, tracking_id):
+        """Get cached score details for borderline logging.
+        Returns (median_score, threshold, is_brownie) or None."""
+        if tracking_id not in self._cache:
+            return None
+        is_brownie, scores, _ = self._cache[tracking_id]
+        if not scores:
+            return None
+        median_score = float(np.median(scores))
+        threshold = self.negative_threshold if self._negative_embedding is not None else self.similarity_threshold
+        return (median_score, threshold, is_brownie)

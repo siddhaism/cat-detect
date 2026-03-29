@@ -67,6 +67,16 @@ def main():
         return
 
     print(f"Found {len(photos)} photos in {photo_dir}")
+
+    # Check reference photo diversity
+    if len(photos) < 8:
+        print(f"\n  TIP: Only {len(photos)} photos. For robust identification, aim for 10-20+ photos covering:")
+        print("    - Poses:    front face, left profile, right profile, sitting, standing, curled up")
+        print("    - Lighting: bright daylight, dim/evening, artificial light, backlit")
+        print("    - Distance: close-up (fills frame), medium (full body), far (small in frame)")
+        print("    - Angles:   camera above, camera level, camera below")
+        print("    - Partial:  partially occluded, turning away, grooming")
+        print("  Use SAVE_CROPS=1 during live detection to auto-capture varied crops.\n")
     embeddings = []
     for photo_path in sorted(photos):
         img = cv2.imread(str(photo_path))
@@ -82,10 +92,25 @@ def main():
         print("Error: no valid images processed")
         return
 
+    # Show per-photo similarity to the average (spot outliers)
     avg_embedding = np.mean(embeddings, axis=0).astype(np.float32)
     norm = np.linalg.norm(avg_embedding)
     if norm > 0:
         avg_embedding = avg_embedding / norm
+
+    print(f"\n  Per-photo similarity to average:")
+    valid_photos = [p for p in sorted(photo_dir.iterdir()) if p.suffix.lower() in extensions]
+    low_sim_photos = []
+    for i, (emb, photo_path) in enumerate(zip(embeddings, valid_photos)):
+        sim = float(np.dot(emb, avg_embedding))
+        marker = " <-- OUTLIER" if sim < 0.70 else ""
+        print(f"    {photo_path.name}: {sim:.3f}{marker}")
+        if sim < 0.70:
+            low_sim_photos.append(photo_path.name)
+    if low_sim_photos:
+        print(f"\n  WARNING: {len(low_sim_photos)} outlier photo(s) with sim < 0.70.")
+        print(f"  These may be mislabeled, blurry, or very different poses.")
+        print(f"  Consider removing them if they hurt identification accuracy.")
 
     np.save(args.output, avg_embedding)
     print(
